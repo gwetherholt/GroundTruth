@@ -1,0 +1,16 @@
+[package]
+name = "groundtruth"
+version = "0.1.0"
+edition = "2021"
+description = "IoT garden monitoring and automation platform using MQTT"
+authors = ["Georgia Wetherholt <gwetherholt@gmail.com>"]
+
+[dependencies]
+rumqttc = "0.24"
+rusqlite = { version = "0.31", features = ["bundled"] }
+tokio = { version = "1", features = ["full"] }
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

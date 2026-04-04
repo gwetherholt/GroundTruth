@@ -1,0 +1,30 @@
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: groundtruth-mosquitto
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-log:/mosquitto/log
+
+  server:
+    build: .
+    container_name: groundtruth-server
+    restart: unless-stopped
+    depends_on:
+      - mosquitto
+    environment:
+      - RUST_LOG=groundtruth=info
+      - MQTT_BROKER_HOST=mosquitto
+      - MQTT_BROKER_PORT=1883
+      - DB_PATH=/data/groundtruth.db
+    volumes:
+      - server-data:/data
+
+volumes:
+  mosquitto-data:
+  mosquitto-log:
+  server-data:
