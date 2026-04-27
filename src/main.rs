@@ -1,6 +1,5 @@
 use chrono::Utc;
 use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
-use rusqlite::Connection;
 use std::sync::{Arc, Mutex};
 use tracing::{error, info, warn};
 
