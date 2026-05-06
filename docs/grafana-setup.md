@@ -1,28 +1,40 @@
 # GroundTruth Grafana setup
 
-These steps integrate GroundTruth metrics into the existing QuailSync
-Prometheus + Grafana stack on the Pi. They run once after the Rust
-backend is updated to expose `/metrics`.
+Wire GroundTruth's Prometheus metrics into the existing QuailSync
+Prometheus + Grafana stack on the Pi. One-time setup.
 
-## 1. Verify the metrics endpoint
+## Prerequisites
 
-After deploying the latest Rust backend:
+- GroundTruth Rust backend deployed with `/metrics` endpoint working
+- QuailSync's Prometheus + Grafana already running on the Pi
+- SSH access to the Pi
+
+Verify the metrics endpoint responds before doing anything else:
 
 ```bash
-curl http://192.168.0.114:3002/metrics
+curl http://192.168.0.114:3002/metrics | head -5
 ```
 
-You should see Prometheus text-format output including
-`groundtruth_readings_total`, `groundtruth_moisture_percent`, etc.
+Expected output starts with `# HELP groundtruth_...`. If empty, fire a
+test publish first to wake up the lazy metric initializers:
 
-If the output is empty or missing the expected metric names, the backend
-hasn't yet ingested any readings — flash a sensor or use mosquitto_pub
-to inject one first, then re-curl.
+```bash
+mosquitto_pub -h 192.168.0.114 -t 'groundtruth/bed/1/moisture' -m '50'
+```
 
-## 2. Add the GroundTruth scrape job to Prometheus
+Then re-curl.
 
-Edit `/home/gwetherholt/QuailSyncV2/prometheus.yml` on the Pi. Add the
-new job under `scrape_configs:` (alongside the existing `quailsync` job):
+## 1. Add the GroundTruth scrape job to Prometheus
+
+On the Pi:
+
+```bash
+cd /home/gwetherholt/QuailSyncV2
+sudo cp prometheus.yml prometheus.yml.bak
+```
+
+Then edit `prometheus.yml` and add this entry under `scrape_configs:`
+alongside the existing `quailsync` job:
 
 ```yaml
   - job_name: "groundtruth"
@@ -32,57 +44,112 @@ new job under `scrape_configs:` (alongside the existing `quailsync` job):
     scrape_interval: 30s
 ```
 
-The full file should now contain two jobs.
-
-Reload Prometheus by restarting its container:
+Restart Prometheus to pick up the new config:
 
 ```bash
-sudo docker compose -f /home/gwetherholt/QuailSyncV2/docker-compose.yml restart prometheus
+sudo docker compose restart prometheus
 ```
 
-(Adjust the path if the QuailSync compose file is elsewhere.)
+## 2. Verify the scrape target is healthy
 
-Verify the scrape target is healthy:
+Open in a browser:
 
 ```
 http://192.168.0.114:9090/targets
 ```
 
-You should see `groundtruth` listed with state `UP`.
+You should see two jobs: `quailsync` (existing) and `groundtruth` with
+state `UP`. If `groundtruth` shows `DOWN`, see Troubleshooting below.
 
-## 3. Import the dashboard into Grafana
-
-Open Grafana at `http://192.168.0.114:3001` and log in.
-
-- Dashboards → New → Import
-- Upload JSON file → select `docs/grafana-dashboard.json` from this repo,
-  OR paste its contents directly
-- When prompted for the data source, select the existing Prometheus
-- Click Import
-
-The dashboard appears with six panels: moisture, temperature, humidity,
-raw ADC, validation quality stats, and reading rate.
-
-## Troubleshooting
-
-**Targets page shows "Connection refused"**: Prometheus is reaching
-GroundTruth via `localhost:3002` from inside the Prometheus container.
-This works only when the Prometheus container shares the host network or
-when the GroundTruth Docker port mapping binds to all interfaces. Verify:
-
-```bash
-sudo ss -tlnp | grep 3002
-```
-
-Should show `0.0.0.0:3002` or `*:3002`. If it shows `127.0.0.1:3002`,
-update the GroundTruth `docker-compose.yml` ports section accordingly.
-
-**No data in dashboard panels**: confirm metrics are being scraped:
+You can also test directly in the Prometheus query UI:
 
 ```
 http://192.168.0.114:9090/graph?g0.expr=groundtruth_readings_total
 ```
 
-If the query returns results, the dashboard's Prometheus data source UID
-likely doesn't match the imported JSON's `"uid": "prometheus"`. Edit the
-panel data source manually after import to point at your real instance.
+Should return at least one series.
+
+## 3. Import the Grafana dashboard
+
+Open Grafana at `http://192.168.0.114:3001` and sign in.
+
+- Dashboards → New → Import
+- Click "Upload JSON file"
+- Select `docs/grafana-dashboard.json` from this repo
+- When asked for a data source, select the existing Prometheus
+- Click Import
+
+The dashboard appears with six panels: moisture, temperature, humidity,
+raw ADC, validation quality stats, and reading rate.
+
+## 4. Generate demo data (optional)
+
+If your C3 is currently publishing only stuck readings (or no readings),
+the dashboard will look empty. Use the helper script to populate it
+with realistic-looking moisture data:
+
+```bash
+./scripts/seed-demo-data.sh
+```
+
+Wait ~30 seconds after the script finishes — Prometheus needs one
+scrape cycle to pick up the new metric values.
+
+## Troubleshooting
+
+### Target shows DOWN with "connection refused"
+
+Prometheus reaches GroundTruth via `localhost:3002` from inside its
+container. This works when:
+- Prometheus uses host networking (the QuailSync setup), AND
+- GroundTruth's Docker port mapping binds to `0.0.0.0:3002`, not
+  `127.0.0.1:3002`.
+
+Verify the bind address:
+
+```bash
+sudo ss -tlnp | grep 3002
+```
+
+Look for `0.0.0.0:3002` or `*:3002`. If you see `127.0.0.1:3002`, edit
+GroundTruth's `docker-compose.yml` and explicitly set the host bind:
+
+```yaml
+ports:
+  - "0.0.0.0:3002:3001"
+```
+
+### Empty `/metrics` output
+
+Prometheus metrics use lazy initialization. If no readings have been
+ingested since server start, the metric vectors don't exist yet — and
+Prometheus's text encoder emits nothing for empty registries. Fix by
+publishing one reading:
+
+```bash
+mosquitto_pub -h 192.168.0.114 -t 'groundtruth/bed/1/moisture' -m '50'
+```
+
+### Dashboard panels show "No data"
+
+Two common causes:
+
+1. The data source UID in the imported dashboard JSON is `prometheus`,
+   but your Grafana might use a different UID (often a random string
+   like `cd28bf9e-1a2c-...`). Edit any panel → change the data source
+   in the dropdown → save the dashboard. Grafana will rewrite all panel
+   queries to use the new UID.
+
+2. Prometheus has scraped GroundTruth but the metric you're querying
+   has never had a value. Check at
+   `http://192.168.0.114:9090/graph?g0.expr=groundtruth_moisture_percent`
+   — if empty, no `good`-quality moisture readings have been ingested
+   yet. Run `./scripts/seed-demo-data.sh`.
+
+### Reverting the Prometheus config
+
+```bash
+cd /home/gwetherholt/QuailSyncV2
+sudo cp prometheus.yml.bak prometheus.yml
+sudo docker compose restart prometheus
+```

@@ -64,5 +64,51 @@ cargo test
 - 18650 lithium cells with TP4056 charge boards (deep sleep targeting 60-90 day battery life)
 - 3D-printed PETG enclosures (OpenSCAD)
 
+## Observability
+
+GroundTruth exposes data through three independent surfaces, all
+backed by the same SQLite source of truth:
+
+| Surface | URL | Purpose |
+|---------|-----|---------|
+| Next.js dashboard | `http://localhost:3000` | Custom React UI for daily monitoring |
+| Grafana | `http://192.168.0.114:3001` | Operational metrics via Prometheus |
+| Direct API | `http://192.168.0.114:3002/api/sensors` | Raw JSON for any consumer |
+
+The Rust backend exposes Prometheus metrics at `/metrics`:
+
+- `groundtruth_moisture_percent{zone, zone_id}` — calibrated soil moisture
+- `groundtruth_moisture_raw_adc{zone, zone_id}` — raw ADC for drift detection
+- `groundtruth_temperature_fahrenheit{zone, zone_id}`
+- `groundtruth_humidity_percent{zone, zone_id}`
+- `groundtruth_readings_total{zone, zone_id, metric, quality}` — counter
+
+Gauges only update when validation marks a reading `good`. The counter
+increments for all readings regardless of quality, so failure rates
+are observable as `rate(groundtruth_readings_total{quality="invalid"}[5m])`.
+
+See `docs/grafana-setup.md` for one-time integration with an existing
+Prometheus + Grafana stack, and `docs/grafana-dashboard.json` for the
+pre-built dashboard import file.
+
+## Validation pipeline
+
+Sensor readings are validated at ingestion before being persisted. Each
+reading is assigned a `quality` of `good`, `suspect`, or `invalid`,
+along with a human-readable `validation_reason` when not good.
+
+Tier 1 rules (currently active):
+
+| Rule | Behavior |
+|------|----------|
+| Value range | Per-metric plausibility (moisture 0-100%, temp -40 to 200°F, etc.) |
+| Raw ADC range | ADC outside [100, 3995] = invalid (saturated/shorted sensor) |
+| Stuck reading | 6+ consecutive identical readings = suspect |
+| Rate of change | Implausibly rapid deltas per metric = suspect |
+
+Invalid readings are still persisted (not dropped) so broken sensors
+remain diagnosable. Dashboards filter by `quality = 'good'` to exclude
+them from analytical use.
+
 ## License
 MIT
