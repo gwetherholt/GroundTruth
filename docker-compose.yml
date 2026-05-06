@@ -17,7 +17,7 @@ services:
     depends_on:
       - mosquitto
     ports:
-      - "3001:3001"
+      - "3002:3001"
     environment:
       - RUST_LOG=groundtruth=info
       - MQTT_BROKER_HOST=mosquitto
