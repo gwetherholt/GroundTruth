@@ -1,25 +1,16 @@
-/// Parsed representation of a GroundTruth MQTT topic.
 #[derive(Debug, PartialEq)]
 pub struct TopicReading {
-    /// "bed" or "greenhouse"
     pub zone: String,
-    /// bed_id (e.g. "1", "2") or "greenhouse"
     pub zone_id: String,
-    /// "moisture", "temperature", or "humidity"
     pub metric: String,
 }
 
-/// Parse a GroundTruth MQTT topic into its components.
-///
-/// Expected formats:
-///   groundtruth/bed/{bed_id}/moisture
-///   groundtruth/bed/{bed_id}/temperature
-///   groundtruth/bed/{bed_id}/humidity
-///   groundtruth/greenhouse/temperature
-///   groundtruth/greenhouse/humidity
-///
-/// Returns None for unrecognized topics (including water/command, water/status
-/// which are Phase 2 actuation topics handled separately).
+impl TopicReading {
+    pub fn is_raw_adc(&self) -> bool {
+        self.metric == "moisture_raw"
+    }
+}
+
 pub fn parse_topic(topic: &str) -> Option<TopicReading> {
     let parts: Vec<&str> = topic.split('/').collect();
 
@@ -28,9 +19,11 @@ pub fn parse_topic(topic: &str) -> Option<TopicReading> {
     }
 
     match parts.as_slice() {
-        // groundtruth/bed/{id}/{metric}
         ["groundtruth", "bed", bed_id, metric]
-            if matches!(*metric, "moisture" | "temperature" | "humidity") =>
+            if matches!(
+                *metric,
+                "moisture" | "moisture_raw" | "temperature" | "humidity"
+            ) =>
         {
             Some(TopicReading {
                 zone: "bed".to_string(),
@@ -38,10 +31,7 @@ pub fn parse_topic(topic: &str) -> Option<TopicReading> {
                 metric: metric.to_string(),
             })
         }
-        // groundtruth/greenhouse/{metric}
-        ["groundtruth", "greenhouse", metric]
-            if matches!(*metric, "temperature" | "humidity") =>
-        {
+        ["groundtruth", "greenhouse", metric] if matches!(*metric, "temperature" | "humidity") => {
             Some(TopicReading {
                 zone: "greenhouse".to_string(),
                 zone_id: "greenhouse".to_string(),
@@ -62,6 +52,14 @@ mod tests {
         assert_eq!(result.zone, "bed");
         assert_eq!(result.zone_id, "1");
         assert_eq!(result.metric, "moisture");
+        assert!(!result.is_raw_adc());
+    }
+
+    #[test]
+    fn test_parse_bed_moisture_raw() {
+        let result = parse_topic("groundtruth/bed/1/moisture_raw").unwrap();
+        assert_eq!(result.metric, "moisture_raw");
+        assert!(result.is_raw_adc());
     }
 
     #[test]
@@ -114,5 +112,10 @@ mod tests {
     #[test]
     fn test_reject_empty() {
         assert!(parse_topic("").is_none());
+    }
+
+    #[test]
+    fn test_reject_greenhouse_moisture_raw() {
+        assert!(parse_topic("groundtruth/greenhouse/moisture_raw").is_none());
     }
 }
