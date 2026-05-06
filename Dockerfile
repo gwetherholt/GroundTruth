@@ -21,4 +21,6 @@ ENV DB_PATH=/data/groundtruth.db
 
 VOLUME ["/data"]
 
+EXPOSE 3001
+
 CMD ["groundtruth"]

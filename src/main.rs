@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tracing::{error, info, warn};
 
+mod api;
 mod db;
 mod topics;
 mod validation;
@@ -27,6 +28,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = db::init_db()?;
     let db = Arc::new(Mutex::new(db));
     let raw_buffer: RawBuffer = Arc::new(Mutex::new(HashMap::new()));
+
+    let api_port: u16 = std::env::var("API_PORT")
+        .unwrap_or_else(|_| "3001".to_string())
+        .parse()
+        .expect("API_PORT must be a valid u16");
+    let api_db = Arc::clone(&db);
+    tokio::spawn(async move {
+        api::serve(api_db, api_port).await;
+    });
 
     let broker_host = std::env::var("MQTT_BROKER_HOST").unwrap_or_else(|_| "localhost".to_string());
     let broker_port: u16 = std::env::var("MQTT_BROKER_PORT")

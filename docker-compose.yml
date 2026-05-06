@@ -16,11 +16,14 @@ services:
     restart: unless-stopped
     depends_on:
       - mosquitto
+    ports:
+      - "3001:3001"
     environment:
       - RUST_LOG=groundtruth=info
       - MQTT_BROKER_HOST=mosquitto
       - MQTT_BROKER_PORT=1883
       - DB_PATH=/data/groundtruth.db
+      - API_PORT=3001
     volumes:
       - server-data:/data
 
