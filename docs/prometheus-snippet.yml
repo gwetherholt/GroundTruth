@@ -1,0 +1,5 @@
+- job_name: "groundtruth"
+  static_configs:
+    - targets: ["localhost:3002"]
+  metrics_path: /metrics
+  scrape_interval: 30s

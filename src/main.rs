@@ -7,6 +7,7 @@ use tracing::{error, info, warn};
 
 mod api;
 mod db;
+mod metrics;
 mod topics;
 mod validation;
 
@@ -175,4 +176,13 @@ fn handle_value(
             error!("DB insert failed: {}", e);
         }
     }
+
+    metrics::record_reading(
+        &reading.zone,
+        &reading.zone_id,
+        &reading.metric,
+        value,
+        raw_adc,
+        validation.quality.as_str(),
+    );
 }

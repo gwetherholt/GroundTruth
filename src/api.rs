@@ -64,8 +64,24 @@ pub fn router(db: SharedDb) -> Router {
         .route("/api/sensors", get(sensors_handler))
         .route("/api/readings/latest", get(latest_handler))
         .route("/api/readings/history", get(history_handler))
+        .route("/metrics", get(metrics_handler))
         .layer(cors)
         .with_state(db)
+}
+
+async fn metrics_handler() -> (
+    axum::http::StatusCode,
+    [(axum::http::HeaderName, &'static str); 1],
+    String,
+) {
+    (
+        axum::http::StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
+        crate::metrics::render(),
+    )
 }
 
 pub async fn serve(db: SharedDb, port: u16) {
