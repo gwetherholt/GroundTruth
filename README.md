@@ -5,7 +5,7 @@
 > pipeline with a four-rule validation tier → SQLite, Prometheus, and
 > three independent dashboards.
 
-![GroundTruth dashboard with real overnight data](docs/screenshots/dashboard-overnight.png)
+<img width="2537" height="1220" alt="image" src="https://github.com/user-attachments/assets/4b2eb17a-22c6-4b8e-8698-7666da82db64" />
 
 ---
 
