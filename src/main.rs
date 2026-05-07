@@ -51,14 +51,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (client, mut eventloop) = AsyncClient::new(mqtt_opts, 64);
 
-    client.subscribe("groundtruth/#", QoS::AtLeastOnce).await?;
-    info!(
-        "Subscribed to groundtruth/# on {}:{}",
-        broker_host, broker_port
-    );
-
     loop {
         match eventloop.poll().await {
+            Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                info!(
+                    "MQTT (re)connected to {}:{} — subscribing to groundtruth/#",
+                    broker_host, broker_port
+                );
+                if let Err(e) = client.subscribe("groundtruth/#", QoS::AtLeastOnce).await {
+                    error!("Failed to (re)subscribe: {}", e);
+                }
+            }
             Ok(Event::Incoming(Packet::Publish(publish))) => {
                 let topic = &publish.topic;
                 let payload = match std::str::from_utf8(&publish.payload) {

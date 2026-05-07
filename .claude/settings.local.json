@@ -9,7 +9,8 @@
       "Bash(npm --prefix /c/GeorgiaProjects/GroundTruth/web run typecheck)",
       "Bash(npm --prefix /c/GeorgiaProjects/GroundTruth/web run lint)",
       "Bash(chmod +x /c/GeorgiaProjects/GroundTruth/scripts/seed-demo-data.sh)",
-      "Bash(bash -n /c/GeorgiaProjects/GroundTruth/scripts/seed-demo-data.sh)"
+      "Bash(bash -n /c/GeorgiaProjects/GroundTruth/scripts/seed-demo-data.sh)",
+      "Bash(npm run *)"
     ]
   }
 }
