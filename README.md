@@ -124,6 +124,24 @@ Dashboards filter on `quality = 'good'` to exclude them from analysis.
 
 Severity precedence is `Invalid > Suspect > Good`.
 
+## Sensor health monitoring (Tier-2)
+
+While the validation pipeline judges individual readings, the sensor
+health module judges **sensor streams over time**. Each sensor gets a
+0-100 health score combining five signals (quality rate, reporting
+cadence, drift, variance, recency), refreshed every 30 seconds.
+
+The signals are designed to catch failure modes that escape per-reading
+validation — particularly the slow drift that capacitive soil sensors
+develop over months as moisture leaks into the PCB.
+
+Health scores are exposed via `/api/sensor-health`, the
+`groundtruth_sensor_health_score` Prometheus gauge, and a dedicated
+Grafana dashboard with color-coded status visualization.
+
+See [docs/sensor-health.md](docs/sensor-health.md) for the full design
+and references.
+
 ## The Rust server
 
 Single binary, runs in Docker. Two long-running tasks:
@@ -214,7 +232,11 @@ Roughly in priority order:
 - **Multi-bed scaling** — physical hardware for 6 more sensor nodes; the backend already partitions by `(zone, zone_id)`
 - **Greenhouse climate node** — a separate ESP32-C3 publishing on `groundtruth/greenhouse/*` topics; backend already recognizes that zone
 - **Alert routing** — Prometheus alertmanager rules for "moisture below 30%" or "no readings in 30 minutes"
-- **Tier 2 validation** — cross-sensor consistency checks (e.g. flag moisture readings inconsistent with rainfall in the same zone)
+- **Tier-2 validation (sensor health monitoring)** — implemented. Per-sensor
+  health scores updated every 30 seconds, with five weighted signals
+  (quality rate, cadence, drift, variance, recency) and a Grafana
+  dashboard for visual escalation. Inspired by failure modes documented
+  in the capacitive soil sensor community. See `docs/sensor-health.md`.
 - **Permanent solder bring-up** — move sensor wiring from breadboard to soldered headers for greenhouse deployment
 
 ## License

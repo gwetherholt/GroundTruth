@@ -63,6 +63,21 @@ pub static HUMIDITY_PCT: Lazy<GaugeVec> = Lazy::new(|| {
     g
 });
 
+pub static SENSOR_HEALTH_SCORE: Lazy<GaugeVec> = Lazy::new(|| {
+    let g = GaugeVec::new(
+        prometheus::Opts::new(
+            "groundtruth_sensor_health_score",
+            "Sensor health score 0-100, computed from quality rate, cadence, drift, variance, and recency",
+        ),
+        &["zone", "zone_id", "metric"],
+    )
+    .expect("sensor_health_score gauge");
+    REGISTRY
+        .register(Box::new(g.clone()))
+        .expect("register sensor_health_score");
+    g
+});
+
 pub static READINGS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     let c = IntCounterVec::new(
         prometheus::Opts::new(

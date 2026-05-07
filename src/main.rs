@@ -8,6 +8,7 @@ use tracing::{error, info, warn};
 mod api;
 mod db;
 mod metrics;
+mod sensor_health;
 mod topics;
 mod validation;
 
@@ -34,9 +35,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "3001".to_string())
         .parse()
         .expect("API_PORT must be a valid u16");
+
+    let health_cache = sensor_health::new_cache();
+
     let api_db = Arc::clone(&db);
+    let api_health = Arc::clone(&health_cache);
     tokio::spawn(async move {
-        api::serve(api_db, api_port).await;
+        api::serve(api_db, api_health, api_port).await;
+    });
+
+    let health_db = Arc::clone(&db);
+    let health_cache_for_task = Arc::clone(&health_cache);
+
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        // First tick fires immediately; that's fine, it'll be a no-op
+        // until there's data.
+        loop {
+            interval.tick().await;
+            let conn = match health_db.lock() {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            match sensor_health::refresh_cache(&conn, &health_cache_for_task) {
+                Ok(n) => {
+                    if n > 0 {
+                        tracing::debug!("Refreshed health for {} sensors", n);
+                        update_health_metrics(&health_cache_for_task);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Health refresh failed: {}", e);
+                }
+            }
+        }
     });
 
     let broker_host = std::env::var("MQTT_BROKER_HOST").unwrap_or_else(|_| "localhost".to_string());
@@ -188,4 +220,14 @@ fn handle_value(
         raw_adc,
         validation.quality.as_str(),
     );
+}
+
+fn update_health_metrics(cache: &sensor_health::SharedHealthCache) {
+    if let Ok(c) = cache.lock() {
+        for (key, report) in c.iter() {
+            metrics::SENSOR_HEALTH_SCORE
+                .with_label_values(&[&key.zone, &key.zone_id, &key.metric])
+                .set(report.score);
+        }
+    }
 }

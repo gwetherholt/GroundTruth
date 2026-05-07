@@ -11,7 +11,15 @@ use std::sync::{Arc, Mutex};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{error, info};
 
+use crate::sensor_health::{HealthReport, SharedHealthCache};
+
 pub type SharedDb = Arc<Mutex<Connection>>;
+
+#[derive(Clone)]
+pub struct AppState {
+    pub db: SharedDb,
+    pub health: SharedHealthCache,
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct Reading {
@@ -54,7 +62,7 @@ fn default_hours() -> u32 {
     24
 }
 
-pub fn router(db: SharedDb) -> Router {
+pub fn router(db: SharedDb, health: SharedHealthCache) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
@@ -64,9 +72,10 @@ pub fn router(db: SharedDb) -> Router {
         .route("/api/sensors", get(sensors_handler))
         .route("/api/readings/latest", get(latest_handler))
         .route("/api/readings/history", get(history_handler))
+        .route("/api/sensor-health", get(sensor_health_handler))
         .route("/metrics", get(metrics_handler))
         .layer(cors)
-        .with_state(db)
+        .with_state(AppState { db, health })
 }
 
 async fn metrics_handler() -> (
@@ -84,8 +93,8 @@ async fn metrics_handler() -> (
     )
 }
 
-pub async fn serve(db: SharedDb, port: u16) {
-    let app = router(db);
+pub async fn serve(db: SharedDb, health: SharedHealthCache, port: u16) {
+    let app = router(db, health);
     let addr = format!("0.0.0.0:{}", port);
     info!("HTTP API listening on {}", addr);
     let listener = match tokio::net::TcpListener::bind(&addr).await {
@@ -100,8 +109,11 @@ pub async fn serve(db: SharedDb, port: u16) {
     }
 }
 
-async fn sensors_handler(State(db): State<SharedDb>) -> Result<Json<Vec<Sensor>>, StatusCode> {
-    let conn = db.lock().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+async fn sensors_handler(State(state): State<AppState>) -> Result<Json<Vec<Sensor>>, StatusCode> {
+    let conn = state
+        .db
+        .lock()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut stmt = conn
         .prepare(
@@ -132,10 +144,13 @@ async fn sensors_handler(State(db): State<SharedDb>) -> Result<Json<Vec<Sensor>>
 }
 
 async fn latest_handler(
-    State(db): State<SharedDb>,
+    State(state): State<AppState>,
     Query(q): Query<LatestQuery>,
 ) -> Result<Json<Reading>, StatusCode> {
-    let conn = db.lock().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let conn = state
+        .db
+        .lock()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     match query_latest(&conn, &q.zone, &q.zone_id, &q.metric) {
         Ok(r) => Ok(Json(r)),
         Err(_) => Err(StatusCode::NOT_FOUND),
@@ -143,10 +158,13 @@ async fn latest_handler(
 }
 
 async fn history_handler(
-    State(db): State<SharedDb>,
+    State(state): State<AppState>,
     Query(q): Query<HistoryQuery>,
 ) -> Result<Json<Vec<Reading>>, StatusCode> {
-    let conn = db.lock().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let conn = state
+        .db
+        .lock()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let cutoff = (chrono::Utc::now() - chrono::Duration::hours(q.hours as i64)).to_rfc3339();
 
@@ -199,6 +217,20 @@ fn row_to_reading(row: &rusqlite::Row) -> rusqlite::Result<Reading> {
         validation_reason: row.get(7)?,
         timestamp: row.get(8)?,
     })
+}
+
+async fn sensor_health_handler(State(state): State<AppState>) -> Json<Vec<HealthReport>> {
+    let mut reports: Vec<HealthReport> = match state.health.lock() {
+        Ok(c) => c.values().cloned().collect(),
+        Err(_) => return Json(Vec::new()),
+    };
+    // Sort by score ascending so worst sensors appear first
+    reports.sort_by(|a, b| {
+        a.score
+            .partial_cmp(&b.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Json(reports)
 }
 
 fn internal_err(e: rusqlite::Error) -> StatusCode {
