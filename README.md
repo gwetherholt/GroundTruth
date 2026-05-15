@@ -67,6 +67,11 @@ Three observability surfaces, all backed by the same SQLite source of truth:
 | **Grafana** at `192.168.0.114:3001` | Production-style operational view via Prometheus |
 | **Direct API** at `192.168.0.114:3002/api/sensors` | Raw JSON for any consumer |
 
+GroundTruth ships with its own Prometheus instance for metrics
+collection. Grafana (running separately) connects to it as a dedicated
+data source named `Prometheus (GroundTruth)`. See
+`docs/grafana-setup.md` for setup steps.
+
 The dashboard image at the top of this README shows ~24 hours of real
 overnight data: soil moisture descending naturally as the plant dried,
 temperature cycling diurnally between 65°F and 68°F, humidity inversely
@@ -203,7 +208,9 @@ GroundTruth/
 ├── docs/
 │   ├── grafana-setup.md
 │   ├── grafana-dashboard.json            # importable
-│   └── prometheus-snippet.yml
+│   └── grafana-sensor-health-dashboard.json
+├── prometheus/
+│   └── prometheus.yml                    # GroundTruth's scrape config
 └── docker-compose.yml
 ```
 

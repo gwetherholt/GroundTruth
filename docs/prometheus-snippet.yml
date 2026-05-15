@@ -1,9 +1,0 @@
-# Append this entry under `scrape_configs:` in the QuailSync
-# Prometheus config at /home/gwetherholt/QuailSyncV2/prometheus.yml
-# (alongside the existing quailsync job).
-
-  - job_name: "groundtruth"
-    static_configs:
-      - targets: ["localhost:3002"]
-    metrics_path: /metrics
-    scrape_interval: 30s
