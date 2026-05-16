@@ -1,230 +1,245 @@
 # GroundTruth
 
-> **A self-validating IoT garden monitoring platform.** Capacitive soil
-> moisture, temperature, and humidity sensors → MQTT → a Rust ingestion
-> pipeline with a four-rule validation tier → SQLite, Prometheus, and
-> three independent dashboards.
+> **A two-tier validation framework for streaming numeric data, with a
+> soil sensor IoT system as its reference implementation.** Real-time
+> per-reading checks. Per-sensor health scoring over time. Three
+> dashboards. Runs continuously on a Raspberry Pi watching a real plant.
 
-<img width="2537" height="1220" alt="image" src="https://github.com/user-attachments/assets/4b2eb17a-22c6-4b8e-8698-7666da82db64" />
+![GroundTruth dashboard with real overnight data](docs/screenshots/dashboard-overnight.png)
 
 ---
 
 ## The story
 
-I built GroundTruth's data validation pipeline before I trusted my
-sensors. Good thing — within hours of the first plant being instrumented,
-the pipeline had flagged **25,000 consecutive readings as suspect**.
+GroundTruth started as an IoT garden monitor. The validator emerged as
+the more interesting technical contribution somewhere around hour three.
 
-The sensor was working. The values were "100% moisture" — and they
-were also wrong.
+Within hours of the first sensor coming online, the validation pipeline
+had flagged **25,000 consecutive readings as suspect**. The sensor was
+working. The values were "100% moisture" — and they were also wrong.
 
-The capacitive soil sensor I'd wired up was reading raw ADC values
-around 750 in freshly watered soil. My firmware's calibration constants
-assumed `WET = 1200`. Anything below 1200 calibrated above 100% and got
-clamped. Every reading was reporting maximum saturation. The dashboard
-would have shown a flat 100% line for as long as the system ran.
+My calibration constants assumed the sensor reads ADC 1200 in wet soil.
+Mine reads 750. Every reading was calibrating above 100%, clamping to
+the upper bound, and the dashboard would have shown a flat line as
+moisture data. The stuck-reading detector caught it: 25,000 identical
+values is not a real sensor.
 
-The validation tier caught this because of one of its four rules: the
-**stuck-reading detector** flags any metric that produces six or more
-consecutive readings within ±0.01 of each other. From the validation
-tier's perspective, the sensor was clearly broken — even though the
-underlying ADC readings were responsive and varied. The clamping had
-hidden the variation. The validator surfaced it.
-
-The fix was a one-line calibration update. The lesson — that the
-validator should be built before the sensors are trusted — is the whole
-reason GroundTruth exists.
+That moment made the validator more interesting than the IoT system that
+hosts it. The IoT side is well-trodden — sensors, MQTT, time-series.
+The validator is the thing that catches errors at the source, before
+they pollute downstream analysis. It's the part of the project that
+generalizes beyond gardening.
 
 ---
 
 ## What it is
 
-GroundTruth is a complete IoT monitoring platform for a garden setting.
-Sensor nodes publish via MQTT, an ingestion server validates and
-persists every reading, and three dashboards expose the data for
-different audiences (operators, engineers, automation).
+GroundTruth is two things stacked:
 
-It's a portfolio project, but it runs continuously on real hardware and
-watches a real plant. The data is real. The bugs are real.
+**1. The validator** (the interesting part)
+- A two-tier validation pipeline for streaming numeric data
+- Tier-1: per-reading rules (range, raw plausibility, stuck detection, rate-of-change)
+- Tier-2: per-sensor health scoring (quality rate, cadence, drift, variance, recency)
+- Quality flags persisted alongside data so dashboards can filter or visualize broken sources
+- Sensor health gauges exposed to Prometheus for ops-style alerting
 
-## What it does
+**2. The IoT system** (the reference implementation)
+- ESP32-C3 sensor nodes publishing soil moisture, temperature, humidity via MQTT
+- Rust ingestion server (Axum + tokio + rumqttc) handling MQTT subscription and HTTP API
+- SQLite persistence with quality flags inline on every row
+- Three observability surfaces: Next.js dashboard, Grafana, raw JSON API
+- Self-contained Docker Compose stack with bundled Prometheus
+- Runs continuously on a Raspberry Pi 5 watching a real plant
 
-- **Ingests sensor readings over MQTT** from ESP32-C3 sensor nodes
-- **Validates every reading** against four rules — range, raw ADC plausibility, stuck-reading detection, and rate-of-change
-- **Persists everything** (including invalid readings, for diagnostics) to SQLite with a `quality` and `validation_reason`
-- **Exposes JSON API endpoints** for application UIs (`/api/sensors`, `/api/readings/latest`, `/api/readings/history`)
-- **Exposes Prometheus metrics** for ops dashboards (`/metrics`)
-- **Renders a custom Next.js dashboard** with auto-refresh
-- **Integrates with Grafana** via Prometheus for time-series visualization
+---
 
-## What it looks like running
+## The validation pipeline
 
-Three observability surfaces, all backed by the same SQLite source of truth:
+The validator is structurally separate from the IoT bits. The Rust
+modules `src/validation.rs` and `src/sensor_health.rs` take numbers
+with metadata (zone, zone_id, metric, value, raw_adc, timestamp) and
+return quality judgments. They don't know anything about soil.
 
-| Surface | Purpose |
-|---------|---------|
-| **Next.js dashboard** at `localhost:3000` | Custom React/TypeScript UI for daily monitoring |
-| **Grafana** at `192.168.0.114:3001` | Production-style operational view via Prometheus |
-| **Direct API** at `192.168.0.114:3002/api/sensors` | Raw JSON for any consumer |
+### Tier-1: per-reading validation
 
-GroundTruth ships with its own Prometheus instance for metrics
-collection. Grafana (running separately) connects to it as a dedicated
-data source named `Prometheus (GroundTruth)`. See
-`docs/grafana-setup.md` for setup steps.
+Every reading is assigned `quality ∈ {good, suspect, invalid}` plus a
+human-readable `validation_reason` when not good. Invalid readings are
+persisted (not dropped) so broken sensors remain diagnosable.
 
-The dashboard image at the top of this README shows ~24 hours of real
-overnight data: soil moisture descending naturally as the plant dried,
-temperature cycling diurnally between 65°F and 68°F, humidity inversely
-correlating with temperature exactly as physics predicts.
+| Rule | What it catches | Severity |
+|------|----------------|----------|
+| Value range | Implausible values (e.g. moisture > 100%) | Invalid |
+| Raw ADC range | ADC outside [100, 3995] — saturated/shorted sensor | Invalid |
+| Stuck reading | 6+ consecutive readings within ±0.01 | Suspect |
+| Rate of change | Implausibly rapid deltas (e.g. 30%+ moisture change in 10 min) | Suspect |
+
+Severity precedence is `Invalid > Suspect > Good`.
+
+### Tier-2: per-sensor health monitoring
+
+While Tier-1 judges individual readings, Tier-2 judges sensor *streams*
+over time. Each sensor gets a 0-100 health score updated every 30
+seconds, combining five weighted signals:
+
+| Signal | Weight | What it catches |
+|--------|--------|-----------------|
+| Quality rate | 35% | High suspect/invalid rates from Tier-1 |
+| Reporting cadence | 25% | Sensor stopped reporting or fell behind expected frequency |
+| Drift detection | 20% | Recent mean has moved >3σ from long-term baseline |
+| Variance ratio | 10% | Recent stddev is outside 0.5x–2x the baseline stddev |
+| Recency | 10% | Time since last good reading approaches 10 minutes |
+
+Baselines are computed from the **last 7 days of good readings only**.
+Excluding bad readings from the baseline prevents sensor degradation
+from infecting the model used to detect that same degradation. A sensor
+that's been broken for a week still has a clean baseline from the week
+before.
+
+The Tier-2 signals are designed around well-documented capacitive soil
+sensor failure modes from the hobbyist embedded community: gradual
+coating-leak drift over months (Cave Pearl Project, Daniel Robertson),
+production variance between sensors from the same batch (arduinodiy),
+and slow degradation patterns that escape per-reading validation.
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────┐
-│  ESP32-C3 nodes     │
-│  + SEN0308 (soil)   │  ─── MQTT ─→  ┌──────────────────┐
-│  + DHT22 (climate)  │              │  Mosquitto       │
-└─────────────────────┘              │  (Docker)        │
-                                     └────────┬─────────┘
-                                              │
-                                     ┌────────▼─────────────────────────┐
-                                     │  groundtruth-server (Rust)       │
-                                     │  - parse topic                   │
-                                     │  - 4-rule validation tier        │
-                                     │  - persist to SQLite             │
-                                     │  - update Prometheus metrics     │
-                                     │  - serve JSON API on :3001       │
-                                     └────┬───────┬──────────┬──────────┘
-                                          │       │          │
-                                  /api/*  │       │ /metrics │ SQLite
-                                          │       │          │
-                          ┌───────────────▼┐ ┌────▼─────┐    │
-                          │ Next.js dash   │ │Prometheus│    │
-                          │ (Tailwind +    │ │  scrape  │    │
-                          │  Recharts)     │ └────┬─────┘    │
-                          └────────────────┘      │          │
-                                            ┌─────▼──────┐   │
-                                            │  Grafana   │   │
-                                            └────────────┘   │
-                                                  ↑          │
-                                                  │  query   │
-                                                  └──────────┘
+┌──────────────────────┐
+│  ESP32-C3 nodes      │  ───MQTT───┐
+│  + SEN0308 (soil)    │            │
+│  + DHT22 (climate)   │            │
+└──────────────────────┘            │
+                                    ▼
+                          ┌──────────────────┐
+                          │  Mosquitto       │
+                          └──────────┬───────┘
+                                     │
+            ┌────────────────────────▼──────────────────────┐
+            │  groundtruth-server (Rust)                    │
+            │                                               │
+            │  ┌─────────────────────────────────────────┐  │
+            │  │  Ingestion: parse topic, parse payload  │  │
+            │  └──────────────────────┬──────────────────┘  │
+            │                         ▼                     │
+            │  ┌─────────────────────────────────────────┐  │
+            │  │  VALIDATION PIPELINE                    │  │
+            │  │  ── Tier-1: per-reading rules           │  │
+            │  │  ── Tier-2: per-sensor health (30s loop)│  │
+            │  └──────────────────────┬──────────────────┘  │
+            │                         ▼                     │
+            │  ┌─────────────┐  ┌──────────────┐  ┌─────┐   │
+            │  │   SQLite    │  │  Prometheus  │  │ API │   │
+            │  └─────────────┘  └──────┬───────┘  └──┬──┘   │
+            └──────────────────────────┼─────────────┼──────┘
+                                       │             │
+                              ┌────────▼─────┐  ┌────▼────────────┐
+                              │   Grafana    │  │  Next.js + TS   │
+                              │  (2 dashboards)│  │   dashboard     │
+                              └──────────────┘  └─────────────────┘
 ```
 
-## The validation pipeline
+The validation pipeline is the centerpiece. Everything upstream feeds
+it; everything downstream consumes its judgments.
 
-Each reading is assigned `quality` ∈ `{good, suspect, invalid}` plus a
-human-readable `validation_reason` if it's not good. Invalid readings
-are still persisted (not dropped) so broken sensors remain diagnosable.
-Dashboards filter on `quality = 'good'` to exclude them from analysis.
+---
 
-| Rule | What it detects | Severity |
-|------|----------------|----------|
-| Value range | Implausible values (moisture > 100%, temp > 200°F, etc.) | Invalid |
-| Raw ADC range | ADC outside [100, 3995] — saturated or shorted sensor | Invalid |
-| Stuck reading | 6+ consecutive readings within ±0.01 — sensor not responding | Suspect |
-| Rate of change | Implausibly rapid deltas (e.g. 30%+ moisture change in 10 min) | Suspect |
+## How it generalizes
 
-Severity precedence is `Invalid > Suspect > Good`.
+The validator is built around streaming numeric data with a small
+metadata schema (a source identity, a metric name, a value, an optional
+raw reading, a timestamp). Nothing in the rules themselves depends on
+soil sensors specifically.
 
-## Sensor health monitoring (Tier-2)
+Realistically, today, the validator is coupled to GroundTruth in a few
+ways:
+- Its persistence layer assumes a specific SQLite schema
+- Its baseline window is hardcoded at 7 days
+- Its expected-cadence values are tuned for the firmware's publish rates
 
-While the validation pipeline judges individual readings, the sensor
-health module judges **sensor streams over time**. Each sensor gets a
-0-100 health score combining five signals (quality rate, reporting
-cadence, drift, variance, recency), refreshed every 30 seconds.
+The rule shapes themselves — range checking, raw plausibility, stuck
+detection, rate-of-change, drift, variance ratio, cadence, recency — are
+domain-agnostic. The patterns would apply to financial time-series,
+server metrics, A/B test outputs, or any other streaming numeric data
+where the source can be untrustworthy.
 
-The signals are designed to catch failure modes that escape per-reading
-validation — particularly the slow drift that capacitive soil sensors
-develop over months as moisture leaks into the PCB.
+Extracting the validator into a standalone crate with pluggable
+persistence and configuration is a known follow-up. See "What's next".
 
-Health scores are exposed via `/api/sensor-health`, the
-`groundtruth_sensor_health_score` Prometheus gauge, and a dedicated
-Grafana dashboard with color-coded status visualization.
+---
 
-See [docs/sensor-health.md](docs/sensor-health.md) for the full design
-and references.
+## The IoT reference implementation
 
-## The Rust server
+The IoT side is well-trodden territory, but the design choices are worth
+calling out:
 
-Single binary, runs in Docker. Two long-running tasks:
-
-- **MQTT subscriber loop** consumes `groundtruth/#`, parses topic and
-  payload, validates, persists, updates metrics. Auto-resubscribes on
-  broker reconnect (caught a Mosquitto restart in production once).
-- **Axum HTTP server** on port 3001 serving JSON API and `/metrics`.
-
-The binary is single-threaded async (`#[tokio::main]`). The SQLite
-connection is wrapped in `Arc<Mutex<Connection>>` and shared between the
-ingestion task and HTTP handlers.
-
-Notable design choices:
-
-- **`moisture_raw` and `moisture` are coalesced** by the ingestion
-  layer. The C3 publishes both topics ~10ms apart on each wake; the
-  server buffers `moisture_raw` for 30 seconds and joins it onto the
-  matching `moisture` reading so each row in SQLite has both values.
-- **Validation runs synchronously** inside the message handler. With
-  ~6 readings/minute across 4 metrics × ~3 sensors, this is well within
-  per-message budget and avoids the complexity of an async pipeline.
-- **Metrics use lazy initialization** via `once_cell::Lazy`. A scrape
-  before any reading has been ingested returns an empty (but valid)
-  Prometheus response.
-
-## The hardware
-
-- **ESP32-C3 Super Mini** sensor nodes (multiple — meant to scale to 7+ raised beds and a greenhouse)
-- **DFRobot SEN0308** capacitive soil moisture sensor (analog, 3.3V)
-- **DHT22** temperature + humidity sensor (digital, one-wire)
-- **Raspberry Pi 5** running Docker Compose with Mosquitto + groundtruth-server
+- **ESP32-C3 Super Mini** sensor nodes, deployed to a greenhouse
+- **DFRobot SEN0308** capacitive soil moisture (analog, 3.3V)
+- **DHT22** temperature and humidity (digital, one-wire)
+- **Raspberry Pi 5** running the Docker Compose stack
 
 The sensor node firmware ships in two variants:
 
-- **`groundtruth_node_soil_only.ino`** — production, uses ESP-IDF deep
-  sleep for ~5-minute wake cycles. Battery-friendly.
-- **`groundtruth_node_dev.ino`** — bench debugging, no deep sleep, 10s
-  loop, USB stays alive for live serial output during sensor calibration.
+- `groundtruth_node_soil_only.ino` — production, ESP-IDF deep sleep for
+  ~5-minute wake cycles. Battery-friendly.
+- `groundtruth_node_dev.ino` — bench debugging, no deep sleep, 10s loop,
+  USB stays alive for live serial output during calibration.
+
+The Rust ingestion server is single-threaded async (`#[tokio::main]`)
+with the SQLite connection wrapped in `Arc<Mutex<Connection>>` and
+shared between the ingestion task and HTTP handlers.
+
+Notable design choices:
+
+- **`moisture_raw` and `moisture` are coalesced** into one DB row by
+  buffering raw values for 30 seconds and joining them onto the matching
+  calibrated reading. Each row in SQLite has both values.
+- **Self-contained observability stack.** GroundTruth ships with its
+  own Prometheus instance for metrics. The shared Grafana
+  (a separate service) connects to it as a data source.
+- **MQTT subscriber auto-resubscribes on broker reconnect.** Caught a
+  Mosquitto restart in production once and the system recovered
+  without manual intervention.
+
+---
 
 ## Project layout
 
 ```
 GroundTruth/
 ├── src/                      # Rust ingestion server
+│   ├── validation.rs        # Tier-1: per-reading rules
+│   ├── sensor_health.rs     # Tier-2: per-sensor scoring
 │   ├── main.rs              # MQTT subscriber + task wiring
 │   ├── api.rs               # Axum HTTP routes
 │   ├── db.rs                # SQLite schema + queries
 │   ├── topics.rs            # MQTT topic parser
-│   ├── validation.rs        # 4-rule validation tier
 │   └── metrics.rs           # Prometheus instrumentation
 ├── web/                      # Next.js dashboard
-│   ├── app/                 # App Router pages
-│   ├── components/          # SensorCard, HistoryChart, QualityBadge
-│   └── lib/                 # API client, types, formatters
-├── firmware/
-│   ├── groundtruth_node_soil_only.ino    # production firmware
-│   └── groundtruth_node_dev.ino          # bench dev firmware
-├── docs/
-│   ├── grafana-setup.md
-│   ├── grafana-dashboard.json            # importable
-│   └── grafana-sensor-health-dashboard.json
-├── prometheus/
-│   └── prometheus.yml                    # GroundTruth's scrape config
+├── firmware/                 # ESP32-C3 firmware (deep-sleep + dev variants)
+├── prometheus/               # Bundled Prometheus config
+├── docs/                     # Setup runbooks, dashboard JSONs, design docs
 └── docker-compose.yml
 ```
 
+The validation pipeline lives in two Rust modules at the top of `src/`
+to keep it visible. Everything else in `src/` is the IoT plumbing
+around it.
+
+---
+
 ## Running it
 
-The full bring-up steps live in `docs/grafana-setup.md`. Short version:
+Full setup steps live in `docs/grafana-setup.md`. Short version:
 
 ```bash
 # Backend (on the Pi)
 docker compose up -d
 
-# Verify the API
+# Verify
 curl http://192.168.0.114:3002/api/sensors
-curl http://192.168.0.114:3002/metrics
+curl http://192.168.0.114:3002/metrics | grep groundtruth_sensor_health
 
 # Custom dashboard (anywhere)
 cd web
@@ -232,19 +247,31 @@ npm install --legacy-peer-deps
 npm run dev   # http://localhost:3000
 ```
 
+---
+
 ## What's next
 
 Roughly in priority order:
 
-- **Multi-bed scaling** — physical hardware for 6 more sensor nodes; the backend already partitions by `(zone, zone_id)`
-- **Greenhouse climate node** — a separate ESP32-C3 publishing on `groundtruth/greenhouse/*` topics; backend already recognizes that zone
-- **Alert routing** — Prometheus alertmanager rules for "moisture below 30%" or "no readings in 30 minutes"
-- **Tier-2 validation (sensor health monitoring)** — implemented. Per-sensor
-  health scores updated every 30 seconds, with five weighted signals
-  (quality rate, cadence, drift, variance, recency) and a Grafana
-  dashboard for visual escalation. Inspired by failure modes documented
-  in the capacitive soil sensor community. See `docs/sensor-health.md`.
-- **Permanent solder bring-up** — move sensor wiring from breadboard to soldered headers for greenhouse deployment
+- **Decouple the validator from SQLite specifics** so it can be extracted
+  into a standalone crate. Today the rules are pluggable but the
+  persistence layer assumes a particular schema.
+- **Per-metric tuning of Tier-1 and Tier-2 thresholds.** The variance
+  signal currently flags rock-stable temperature readings as suspect.
+  That's correct given the uniform threshold, but legitimately stable
+  metrics should get more lenient bounds.
+- **Multi-bed scaling.** Wire up more C3 nodes and deploy across the
+  full garden. Backend already partitions by `(zone, zone_id)`.
+- **Greenhouse climate node.** A separate ESP32-C3 publishing on
+  `groundtruth/greenhouse/*` topics; backend already recognizes that
+  zone.
+- **Tier-3 predictive failure detection.** Use historical sensor health
+  trajectories to predict failures before they happen — the obvious
+  successor to current Tier-2 monitoring.
+- **Permanent solder-up.** Move sensor wiring from breadboard to soldered
+  headers and weatherproof enclosure for long-term greenhouse deployment.
+
+---
 
 ## License
 
