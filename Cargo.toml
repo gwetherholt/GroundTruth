@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["groundtruth-validator", "server"]
+members = ["groundtruth-validator", "groundtruth-validator-cli", "server"]
 
 [workspace.package]
 edition = "2021"

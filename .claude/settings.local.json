@@ -7,7 +7,9 @@
       "Bash(node *)",
       "Bash(git mv *)",
       "Bash(git rm *)",
-      "Bash(cargo build *)"
+      "Bash(cargo build *)",
+      "Bash(cargo run *)",
+      "Bash(python -c \"import json, sys; d=json.load\\(sys.stdin\\); print\\('valid json. metric=', d['metric'], 'good=', d['quality']['good'], 'suspect=', d['quality']['suspect'], 'health=', d['health']['overall'], 'status=', d['health']['status']\\)\")"
     ]
   }
 }

@@ -96,11 +96,22 @@ impl StreamValidator {
         result
     }
 
-    /// Recompute health scores for every tracked source. Returns
-    /// (source, metric, score) for each. Also refreshes the internal
-    /// cache that quarantine queries consult.
+    /// Recompute health scores for every tracked source, anchored to
+    /// wall-clock `Utc::now()`. Returns `(source, metric, score)` for
+    /// each. Also refreshes the internal cache that quarantine queries
+    /// consult.
     pub fn update_health(&mut self) -> Vec<(String, String, HealthScore)> {
-        let now = Utc::now();
+        self.update_health_at(Utc::now())
+    }
+
+    /// Like [`Self::update_health`] but uses the provided `now`. Useful
+    /// for offline / historical analysis where the data isn't fresh
+    /// against wall-clock time (e.g. running the validator over a CSV
+    /// of last week's readings).
+    pub fn update_health_at(
+        &mut self,
+        now: chrono::DateTime<Utc>,
+    ) -> Vec<(String, String, HealthScore)> {
         let mut out = Vec::with_capacity(self.health_state.len());
         let mut cache = HashMap::with_capacity(self.health_state.len());
 
@@ -126,7 +137,15 @@ impl StreamValidator {
     /// triples for every source that was advanced. Call after
     /// [`Self::update_health`] for fresh scores.
     pub fn update_quarantine(&mut self) -> Vec<(String, String, QuarantineTransition)> {
-        let now = Utc::now();
+        self.update_quarantine_at(Utc::now())
+    }
+
+    /// Like [`Self::update_quarantine`] but anchors the quarantine
+    /// timestamp to the provided `now`.
+    pub fn update_quarantine_at(
+        &mut self,
+        now: chrono::DateTime<Utc>,
+    ) -> Vec<(String, String, QuarantineTransition)> {
         let mut out = Vec::with_capacity(self.last_health_scores.len());
 
         for (key, score) in self.last_health_scores.iter() {
