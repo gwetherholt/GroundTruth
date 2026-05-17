@@ -3,7 +3,7 @@
 > **A two-tier validation framework for streaming numeric data, with a
 > soil sensor IoT system as its reference implementation.** Real-time
 > per-reading checks. Per-sensor health scoring over time. Three
-> dashboards. Runs continuously on a Raspberry Pi watching a real plant.
+> dashboards. Runs continuously on a Raspberry Pi watching two garden beds.
 
 ![GroundTruth dashboard with real overnight data](docs/screenshots/dashboard-overnight.png)
 
@@ -49,7 +49,25 @@ GroundTruth is two things stacked:
 - SQLite persistence with quality flags inline on every row
 - Three observability surfaces: Next.js dashboard, Grafana, raw JSON API
 - Self-contained Docker Compose stack with bundled Prometheus
-- Runs continuously on a Raspberry Pi 5 watching a real plant
+- Runs continuously on a Raspberry Pi 5 watching two garden beds
+
+---
+
+## Currently running
+
+The system is live in production on the Raspberry Pi 5, processing
+real data from two sensor nodes:
+
+- **bed/1** — soil moisture, temperature, humidity (SEN0308 + DHT22)
+- **bed/2** — soil moisture only (SEN0308)
+
+That's four independent `(source, metric)` streams flowing through
+the validator. Each one gets its own Tier-1 history buffer, its own
+Tier-2 health score with its own baseline, and its own quarantine
+state machine — so bed/1's moisture sensor going stuck doesn't affect
+bed/2's stream, and bed/1's temperature is judged separately from
+bed/1's moisture. The validator's multi-source design is being
+exercised for real, not just in integration tests.
 
 ---
 
@@ -276,8 +294,9 @@ Roughly in priority order:
   signal currently flags rock-stable temperature readings as suspect.
   That's correct given the uniform threshold, but legitimately stable
   metrics should get more lenient bounds.
-- **Multi-bed scaling.** Wire up more C3 nodes and deploy across the
-  full garden. Backend already partitions by `(zone, zone_id)`.
+- **Multi-bed scaling.** Scale beyond the current two beds to the
+  full garden by wiring up more C3 nodes. Backend already partitions
+  by `(zone, zone_id)`.
 - **Greenhouse climate node.** A separate ESP32-C3 publishing on
   `groundtruth/greenhouse/*` topics; backend already recognizes that
   zone.
