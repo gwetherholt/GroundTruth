@@ -20,7 +20,7 @@
   "liveNow": false,
   "panels": [
     {
-      "datasource": { "type": "prometheus", "uid": "prometheus-groundtruth" },
+      "datasource": { "type": "prometheus", "uid": "bfm61expsapkwe" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
@@ -60,7 +60,7 @@
       "type": "stat"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "prometheus-groundtruth" },
+      "datasource": { "type": "prometheus", "uid": "bfm61expsapkwe" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -88,15 +88,24 @@
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "prometheus-groundtruth" },
+      "datasource": { "type": "prometheus", "uid": "bfm61expsapkwe" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "Active", "color": "green", "index": 0 },
+                "1": { "text": "Quarantined", "color": "red", "index": 1 }
+              }
+            }
+          ],
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "red", "value": null },
-              { "color": "green", "value": 40 }
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
             ]
           },
           "unit": "short"
@@ -104,15 +113,18 @@
       },
       "gridPos": { "h": 6, "w": 12, "x": 0, "y": 18 },
       "id": 3,
-      "title": "Sensors below threshold (score < 40)",
+      "title": "Sensor quarantine status",
       "options": {
         "colorMode": "background",
-        "textMode": "value_and_name",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "value_and_name"
       },
       "targets": [
         {
-          "expr": "groundtruth_sensor_health_score < 40",
+          "expr": "groundtruth_sensor_quarantined",
           "legendFormat": "{{zone}}/{{zone_id}}/{{metric}}",
           "refId": "A"
         }
@@ -120,7 +132,7 @@
       "type": "stat"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "prometheus-groundtruth" },
+      "datasource": { "type": "prometheus", "uid": "bfm61expsapkwe" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -157,6 +169,6 @@
   "timezone": "",
   "title": "GroundTruth Sensor Health",
   "uid": "groundtruth-sensor-health",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }
