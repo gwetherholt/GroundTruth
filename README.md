@@ -53,6 +53,22 @@ GroundTruth is two things stacked:
 
 ---
 
+## Workspace structure
+
+The repo is a Cargo workspace with three members:
+
+| Crate | Purpose | README |
+|-------|---------|--------|
+| [`groundtruth-validator`](groundtruth-validator/README.md) | The validation framework as a standalone library. No I/O, no storage, no transport. Push readings in, get classifications, health scores, and quarantine state out. | [README](groundtruth-validator/README.md) |
+| [`groundtruth-validator-cli`](groundtruth-validator-cli/README.md) | `gt-validate` command-line tool that runs the validator over arbitrary CSV files. Proves the library is domain-agnostic. | [README](groundtruth-validator-cli/README.md) |
+| `server` | The GroundTruth Rust binary: MQTT ingestion, SQLite persistence, Prometheus metrics, Axum API. Consumes `groundtruth-validator` as a dependency. | — |
+
+The validator is the headline contribution; everything else exists to
+prove it works on real data (the server) and on data that isn't soil
+sensors (the CLI).
+
+---
+
 ## The validation pipeline
 
 The validator is structurally separate from the IoT bits. The Rust
