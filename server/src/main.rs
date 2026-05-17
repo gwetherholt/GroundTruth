@@ -1,4 +1,7 @@
-use chrono::Utc;
+use chrono::{Duration, Utc};
+use groundtruth_validator::{
+    MetricConfig, QualityLevel, QuarantineTransition, Reading, StreamValidator, ValidatorConfig,
+};
 use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -8,13 +11,37 @@ use tracing::{error, info, warn};
 mod api;
 mod db;
 mod metrics;
-mod sensor_health;
 mod topics;
-mod validation;
 
 const RAW_BUFFER_TTL_SECS: u64 = 30;
 
 type RawBuffer = Arc<Mutex<HashMap<String, (i64, Instant)>>>;
+pub type SharedValidator = Arc<Mutex<StreamValidator>>;
+
+/// Build the validator config that matches GroundTruth's sensor mix.
+/// Numbers come from the original hardcoded `limits` module so behavior
+/// stays equivalent to the pre-refactor server.
+fn build_validator_config() -> ValidatorConfig {
+    let moisture = MetricConfig::new(0.0..=100.0)
+        .with_raw_range(100..=3995)
+        .with_max_rate_of_change(30.0)
+        .with_rate_window(Duration::seconds(600))
+        .with_expected_cadence(Duration::seconds(60));
+    let humidity = MetricConfig::new(0.0..=100.0)
+        .with_max_rate_of_change(30.0)
+        .with_rate_window(Duration::seconds(600))
+        .with_expected_cadence(Duration::seconds(60));
+    let temperature = MetricConfig::new(-40.0..=200.0)
+        .with_max_rate_of_change(20.0)
+        .with_rate_window(Duration::seconds(600))
+        .with_expected_cadence(Duration::seconds(60));
+
+    ValidatorConfig::builder()
+        .metric("moisture", moisture)
+        .metric("humidity", humidity)
+        .metric("temperature", temperature)
+        .build()
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -36,42 +63,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()
         .expect("API_PORT must be a valid u16");
 
-    let health_cache = sensor_health::new_cache();
-    let quarantine_cache = sensor_health::new_quarantine_cache();
+    let validator: SharedValidator =
+        Arc::new(Mutex::new(StreamValidator::new(build_validator_config())));
 
     let api_db = Arc::clone(&db);
-    let api_health = Arc::clone(&health_cache);
-    let api_quarantine = Arc::clone(&quarantine_cache);
+    let api_validator = Arc::clone(&validator);
     tokio::spawn(async move {
-        api::serve(api_db, api_health, api_quarantine, api_port).await;
+        api::serve(api_db, api_validator, api_port).await;
     });
 
-    let health_db = Arc::clone(&db);
-    let health_cache_for_task = Arc::clone(&health_cache);
-    let quarantine_cache_for_task = Arc::clone(&quarantine_cache);
-
+    let health_validator = Arc::clone(&validator);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
-        // First tick fires immediately; that's fine, it'll be a no-op
-        // until there's data.
         loop {
             interval.tick().await;
-            let conn = match health_db.lock() {
-                Ok(c) => c,
+            let mut v = match health_validator.lock() {
+                Ok(v) => v,
                 Err(_) => continue,
             };
-            match sensor_health::refresh_cache(&conn, &health_cache_for_task) {
-                Ok(n) => {
-                    if n > 0 {
-                        tracing::debug!("Refreshed health for {} sensors", n);
-                        update_health_metrics(&health_cache_for_task);
-                        update_quarantine(&health_cache_for_task, &quarantine_cache_for_task);
+            let scores = v.update_health();
+            for (zone_full, metric, score) in scores.iter() {
+                let (zone, zone_id) = split_source(zone_full);
+                metrics::SENSOR_HEALTH_SCORE
+                    .with_label_values(&[zone, zone_id, metric])
+                    .set(score.overall);
+            }
+            let transitions = v.update_quarantine();
+            for (zone_full, metric, transition) in transitions.iter() {
+                let (zone, zone_id) = split_source(zone_full);
+                let quarantined = v.is_quarantined(zone_full, metric);
+                metrics::SENSOR_QUARANTINED
+                    .with_label_values(&[zone, zone_id, metric])
+                    .set(if quarantined { 1.0 } else { 0.0 });
+                match transition {
+                    QuarantineTransition::Entered => {
+                        metrics::QUARANTINE_EVENTS_TOTAL
+                            .with_label_values(&[zone, zone_id, metric])
+                            .inc();
+                        warn!("Sensor {}/{} entered quarantine", zone_full, metric);
                     }
-                }
-                Err(e) => {
-                    tracing::warn!("Health refresh failed: {}", e);
+                    QuarantineTransition::Recovered => {
+                        info!("Sensor {}/{} recovered from quarantine", zone_full, metric);
+                    }
+                    QuarantineTransition::Unchanged => {}
                 }
             }
+            tracing::debug!("Refreshed health for {} sensors", scores.len());
         }
     });
 
@@ -121,7 +158,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if reading.is_raw_adc() {
                     handle_raw_adc(&raw_buffer, &reading, payload);
                 } else {
-                    handle_value(&db, &raw_buffer, &reading, payload);
+                    handle_value(&db, &validator, &raw_buffer, &reading, payload);
                 }
             }
             Ok(_) => {}
@@ -149,6 +186,7 @@ fn handle_raw_adc(buffer: &RawBuffer, reading: &topics::TopicReading, payload: &
 
 fn handle_value(
     db: &Arc<Mutex<rusqlite::Connection>>,
+    validator: &SharedValidator,
     buffer: &RawBuffer,
     reading: &topics::TopicReading,
     payload: &str,
@@ -173,32 +211,39 @@ fn handle_value(
         None
     };
 
-    let timestamp = Utc::now().to_rfc3339();
+    let now = Utc::now();
+    let source = format!("{}/{}", reading.zone, reading.zone_id);
+    let mut gt_reading = Reading::new(&source, &reading.metric, value, now);
+    if let Some(raw) = raw_adc {
+        gt_reading = gt_reading.with_raw(raw);
+    }
 
-    let validation = if let Ok(db_lock) = db.lock() {
-        validation::validate_reading(
-            &db_lock,
-            &reading.zone,
-            &reading.zone_id,
-            &reading.metric,
-            value,
-            raw_adc,
-            &timestamp,
-        )
-    } else {
-        validation::Validation::good()
+    let result = match validator.lock() {
+        Ok(mut v) => v.validate(gt_reading),
+        Err(_) => groundtruth_validator::ValidationResult::good(),
     };
 
-    if validation.quality != validation::Quality::Good {
+    if result.quality != QualityLevel::Good {
         warn!(
             "{}: {} = {} flagged as {} ({})",
             reading.zone_id,
             reading.metric,
             value,
-            validation.quality,
-            validation.reason.as_deref().unwrap_or("?"),
+            result.quality,
+            if result.reason.is_empty() {
+                "?"
+            } else {
+                &result.reason
+            },
         );
     }
+
+    let timestamp = now.to_rfc3339();
+    let reason_for_db = if result.quality == QualityLevel::Good {
+        None
+    } else {
+        Some(result.reason.as_str())
+    };
 
     if let Ok(db_lock) = db.lock() {
         if let Err(e) = db::insert_reading(
@@ -209,8 +254,8 @@ fn handle_value(
             value,
             &timestamp,
             raw_adc,
-            validation.quality.as_str(),
-            validation.reason.as_deref(),
+            result.quality.as_str(),
+            reason_for_db,
         ) {
             error!("DB insert failed: {}", e);
         }
@@ -222,60 +267,16 @@ fn handle_value(
         &reading.metric,
         value,
         raw_adc,
-        validation.quality.as_str(),
+        result.quality.as_str(),
     );
 }
 
-fn update_health_metrics(cache: &sensor_health::SharedHealthCache) {
-    if let Ok(c) = cache.lock() {
-        for (key, report) in c.iter() {
-            metrics::SENSOR_HEALTH_SCORE
-                .with_label_values(&[&key.zone, &key.zone_id, &key.metric])
-                .set(report.score);
-        }
-    }
-}
-
-fn update_quarantine(
-    health: &sensor_health::SharedHealthCache,
-    quarantine: &sensor_health::SharedQuarantineCache,
-) {
-    let snapshot: Vec<(sensor_health::SensorKey, f64)> = match health.lock() {
-        Ok(c) => c
-            .iter()
-            .map(|(k, r)| (k.clone(), r.score))
-            .collect(),
-        Err(_) => return,
-    };
-
-    let now = Utc::now();
-    let mut q = match quarantine.lock() {
-        Ok(q) => q,
-        Err(_) => return,
-    };
-
-    for (key, score) in snapshot {
-        let state = q.entry(key.clone()).or_default();
-        let transition = sensor_health::update_quarantine_state(state, score, now);
-
-        let labels = [key.zone.as_str(), key.zone_id.as_str(), key.metric.as_str()];
-        metrics::SENSOR_QUARANTINED
-            .with_label_values(&labels)
-            .set(if state.is_quarantined { 1.0 } else { 0.0 });
-
-        if transition == sensor_health::QuarantineTransition::Entered {
-            metrics::QUARANTINE_EVENTS_TOTAL
-                .with_label_values(&labels)
-                .inc();
-            tracing::warn!(
-                "Sensor {}/{}/{} entered quarantine (score={:.1})",
-                key.zone, key.zone_id, key.metric, score
-            );
-        } else if transition == sensor_health::QuarantineTransition::Recovered {
-            tracing::info!(
-                "Sensor {}/{}/{} recovered from quarantine (score={:.1})",
-                key.zone, key.zone_id, key.metric, score
-            );
-        }
+/// Split a validator `source` of the form `"{zone}/{zone_id}"` back
+/// into its parts. Returns `(source, source)` as a fallback if the
+/// source doesn't contain `/`.
+pub fn split_source(source: &str) -> (&str, &str) {
+    match source.split_once('/') {
+        Some((z, id)) => (z, id),
+        None => (source, source),
     }
 }

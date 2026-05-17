@@ -1,0 +1,12 @@
+[package]
+name = "groundtruth-validator"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+description = "Two-tier validation framework for streaming numeric data: per-reading rules, per-source health scoring, and quarantine state machine. Storage- and transport-agnostic."
+license = "MIT"
+readme = "README.md"
+
+[dependencies]
+chrono = { workspace = true }
+serde = { workspace = true }

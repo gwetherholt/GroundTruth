@@ -5,38 +5,22 @@ use axum::{
     routing::get,
     Router,
 };
+use chrono::{DateTime, Utc};
+use groundtruth_validator::HealthScore;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{error, info};
 
-use crate::sensor_health::{HealthReport, SharedHealthCache, SharedQuarantineCache};
+use crate::{split_source, SharedValidator};
 
 pub type SharedDb = Arc<Mutex<Connection>>;
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: SharedDb,
-    pub health: SharedHealthCache,
-    pub quarantine: SharedQuarantineCache,
-}
-
-#[derive(Serialize)]
-pub struct QuarantinedSensor {
-    pub zone: String,
-    pub zone_id: String,
-    pub metric: String,
-    pub quarantined_at: chrono::DateTime<chrono::Utc>,
-    pub reason: String,
-    pub current_health_score: f64,
-}
-
-#[derive(Serialize)]
-pub struct QuarantineResponse {
-    pub quarantined_sensors: Vec<QuarantinedSensor>,
-    pub total_active_sensors: usize,
-    pub total_quarantined: usize,
+    pub validator: SharedValidator,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -80,11 +64,34 @@ fn default_hours() -> u32 {
     24
 }
 
-pub fn router(
-    db: SharedDb,
-    health: SharedHealthCache,
-    quarantine: SharedQuarantineCache,
-) -> Router {
+#[derive(Serialize)]
+pub struct SensorHealth {
+    pub zone: String,
+    pub zone_id: String,
+    pub metric: String,
+    #[serde(flatten)]
+    pub score: HealthScore,
+    pub status: &'static str,
+}
+
+#[derive(Serialize)]
+pub struct QuarantinedSensor {
+    pub zone: String,
+    pub zone_id: String,
+    pub metric: String,
+    pub quarantined_at: DateTime<Utc>,
+    pub reason: String,
+    pub current_health_score: f64,
+}
+
+#[derive(Serialize)]
+pub struct QuarantineResponse {
+    pub quarantined_sensors: Vec<QuarantinedSensor>,
+    pub total_active_sensors: usize,
+    pub total_quarantined: usize,
+}
+
+pub fn router(db: SharedDb, validator: SharedValidator) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
@@ -98,11 +105,7 @@ pub fn router(
         .route("/api/sensor-health/quarantine", get(quarantine_handler))
         .route("/metrics", get(metrics_handler))
         .layer(cors)
-        .with_state(AppState {
-            db,
-            health,
-            quarantine,
-        })
+        .with_state(AppState { db, validator })
 }
 
 async fn metrics_handler() -> (
@@ -120,13 +123,8 @@ async fn metrics_handler() -> (
     )
 }
 
-pub async fn serve(
-    db: SharedDb,
-    health: SharedHealthCache,
-    quarantine: SharedQuarantineCache,
-    port: u16,
-) {
-    let app = router(db, health, quarantine);
+pub async fn serve(db: SharedDb, validator: SharedValidator, port: u16) {
+    let app = router(db, validator);
     let addr = format!("0.0.0.0:{}", port);
     info!("HTTP API listening on {}", addr);
     let listener = match tokio::net::TcpListener::bind(&addr).await {
@@ -251,34 +249,63 @@ fn row_to_reading(row: &rusqlite::Row) -> rusqlite::Result<Reading> {
     })
 }
 
-async fn quarantine_handler(State(state): State<AppState>) -> Json<QuarantineResponse> {
-    let health_scores: std::collections::HashMap<_, _> = match state.health.lock() {
-        Ok(c) => c.iter().map(|(k, r)| (k.clone(), r.score)).collect(),
-        Err(_) => std::collections::HashMap::new(),
-    };
-
-    let quarantine_entries: Vec<_> = match state.quarantine.lock() {
-        Ok(q) => q
-            .iter()
-            .filter(|(_, s)| s.is_quarantined)
-            .map(|(k, s)| (k.clone(), s.clone()))
+async fn sensor_health_handler(State(state): State<AppState>) -> Json<Vec<SensorHealth>> {
+    let entries: Vec<SensorHealth> = match state.validator.lock() {
+        Ok(v) => v
+            .health_scores()
+            .map(|((src, metric), score)| {
+                let (zone, zone_id) = split_source(src);
+                SensorHealth {
+                    zone: zone.to_string(),
+                    zone_id: zone_id.to_string(),
+                    metric: metric.clone(),
+                    status: status_for_score(score.overall),
+                    score: score.clone(),
+                }
+            })
             .collect(),
         Err(_) => Vec::new(),
     };
 
-    let total_active_sensors = health_scores.len();
-    let total_quarantined = quarantine_entries.len();
+    let mut sorted = entries;
+    sorted.sort_by(|a, b| {
+        a.score
+            .overall
+            .partial_cmp(&b.score.overall)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Json(sorted)
+}
 
-    let mut quarantined_sensors: Vec<QuarantinedSensor> = quarantine_entries
-        .into_iter()
-        .filter_map(|(key, state)| {
+async fn quarantine_handler(State(state): State<AppState>) -> Json<QuarantineResponse> {
+    let v = match state.validator.lock() {
+        Ok(v) => v,
+        Err(_) => {
+            return Json(QuarantineResponse {
+                quarantined_sensors: Vec::new(),
+                total_active_sensors: 0,
+                total_quarantined: 0,
+            });
+        }
+    };
+
+    let total_active_sensors = v.sources().len();
+
+    let mut quarantined_sensors: Vec<QuarantinedSensor> = v
+        .quarantine_states()
+        .filter(|(_, s)| s.is_quarantined)
+        .filter_map(|((src, metric), state)| {
             let quarantined_at = state.quarantined_at?;
             let reason = state.reason.clone().unwrap_or_default();
-            let current_health_score = health_scores.get(&key).copied().unwrap_or(0.0);
+            let current_health_score = v
+                .health_score(src, metric)
+                .map(|s| s.overall)
+                .unwrap_or(0.0);
+            let (zone, zone_id) = split_source(src);
             Some(QuarantinedSensor {
-                zone: key.zone,
-                zone_id: key.zone_id,
-                metric: key.metric,
+                zone: zone.to_string(),
+                zone_id: zone_id.to_string(),
+                metric: metric.clone(),
                 quarantined_at,
                 reason,
                 current_health_score,
@@ -286,13 +313,13 @@ async fn quarantine_handler(State(state): State<AppState>) -> Json<QuarantineRes
         })
         .collect();
 
-    // Stable ordering: worst score first.
     quarantined_sensors.sort_by(|a, b| {
         a.current_health_score
             .partial_cmp(&b.current_health_score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
+    let total_quarantined = quarantined_sensors.len();
     Json(QuarantineResponse {
         quarantined_sensors,
         total_active_sensors,
@@ -300,18 +327,16 @@ async fn quarantine_handler(State(state): State<AppState>) -> Json<QuarantineRes
     })
 }
 
-async fn sensor_health_handler(State(state): State<AppState>) -> Json<Vec<HealthReport>> {
-    let mut reports: Vec<HealthReport> = match state.health.lock() {
-        Ok(c) => c.values().cloned().collect(),
-        Err(_) => return Json(Vec::new()),
-    };
-    // Sort by score ascending so worst sensors appear first
-    reports.sort_by(|a, b| {
-        a.score
-            .partial_cmp(&b.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    Json(reports)
+fn status_for_score(score: f64) -> &'static str {
+    if score >= 90.0 {
+        "healthy"
+    } else if score >= 70.0 {
+        "degraded"
+    } else if score >= 40.0 {
+        "suspect"
+    } else {
+        "bad"
+    }
 }
 
 fn internal_err(e: rusqlite::Error) -> StatusCode {

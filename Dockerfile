@@ -2,9 +2,10 @@ FROM rust:1.82-slim-bookworm AS builder
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock* ./
-COPY src/ src/
+COPY groundtruth-validator/ groundtruth-validator/
+COPY server/ server/
 
-RUN cargo build --release
+RUN cargo build --release -p groundtruth
 
 FROM debian:bookworm-slim
 
