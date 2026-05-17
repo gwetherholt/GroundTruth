@@ -6,6 +6,7 @@
 > dashboards. Runs continuously on a Raspberry Pi watching two garden beds.
 
 ![GroundTruth dashboard with real overnight data](docs/screenshots/dashboard-overnight.png)
+<img width="2520" height="1247" alt="image" src="https://github.com/user-attachments/assets/5480c0a0-e60d-4be9-be90-9310e4bff33c" />
 
 ---
 
@@ -88,6 +89,7 @@ sensors (the CLI).
 ---
 
 ## The validation pipeline
+<img width="1168" height="619" alt="image" src="https://github.com/user-attachments/assets/81d444f8-ecd0-4ec9-929b-4ee9a7493b29" />
 
 The validator is structurally separate from the IoT bits. The Rust
 modules `src/validation.rs` and `src/sensor_health.rs` take numbers
