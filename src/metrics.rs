@@ -78,6 +78,36 @@ pub static SENSOR_HEALTH_SCORE: Lazy<GaugeVec> = Lazy::new(|| {
     g
 });
 
+pub static SENSOR_QUARANTINED: Lazy<GaugeVec> = Lazy::new(|| {
+    let g = GaugeVec::new(
+        prometheus::Opts::new(
+            "groundtruth_sensor_quarantined",
+            "1.0 if the sensor is currently quarantined (Tier-2 health below 40 for 3+ consecutive checks), 0.0 otherwise",
+        ),
+        &["zone", "zone_id", "metric"],
+    )
+    .expect("sensor_quarantined gauge");
+    REGISTRY
+        .register(Box::new(g.clone()))
+        .expect("register sensor_quarantined");
+    g
+});
+
+pub static QUARANTINE_EVENTS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    let c = IntCounterVec::new(
+        prometheus::Opts::new(
+            "groundtruth_quarantine_events_total",
+            "Total times a sensor has entered quarantine",
+        ),
+        &["zone", "zone_id", "metric"],
+    )
+    .expect("quarantine_events counter");
+    REGISTRY
+        .register(Box::new(c.clone()))
+        .expect("register quarantine_events");
+    c
+});
+
 pub static READINGS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     let c = IntCounterVec::new(
         prometheus::Opts::new(

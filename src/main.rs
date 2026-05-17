@@ -37,15 +37,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("API_PORT must be a valid u16");
 
     let health_cache = sensor_health::new_cache();
+    let quarantine_cache = sensor_health::new_quarantine_cache();
 
     let api_db = Arc::clone(&db);
     let api_health = Arc::clone(&health_cache);
+    let api_quarantine = Arc::clone(&quarantine_cache);
     tokio::spawn(async move {
-        api::serve(api_db, api_health, api_port).await;
+        api::serve(api_db, api_health, api_quarantine, api_port).await;
     });
 
     let health_db = Arc::clone(&db);
     let health_cache_for_task = Arc::clone(&health_cache);
+    let quarantine_cache_for_task = Arc::clone(&quarantine_cache);
 
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
@@ -62,6 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if n > 0 {
                         tracing::debug!("Refreshed health for {} sensors", n);
                         update_health_metrics(&health_cache_for_task);
+                        update_quarantine(&health_cache_for_task, &quarantine_cache_for_task);
                     }
                 }
                 Err(e) => {
@@ -228,6 +232,50 @@ fn update_health_metrics(cache: &sensor_health::SharedHealthCache) {
             metrics::SENSOR_HEALTH_SCORE
                 .with_label_values(&[&key.zone, &key.zone_id, &key.metric])
                 .set(report.score);
+        }
+    }
+}
+
+fn update_quarantine(
+    health: &sensor_health::SharedHealthCache,
+    quarantine: &sensor_health::SharedQuarantineCache,
+) {
+    let snapshot: Vec<(sensor_health::SensorKey, f64)> = match health.lock() {
+        Ok(c) => c
+            .iter()
+            .map(|(k, r)| (k.clone(), r.score))
+            .collect(),
+        Err(_) => return,
+    };
+
+    let now = Utc::now();
+    let mut q = match quarantine.lock() {
+        Ok(q) => q,
+        Err(_) => return,
+    };
+
+    for (key, score) in snapshot {
+        let state = q.entry(key.clone()).or_default();
+        let transition = sensor_health::update_quarantine_state(state, score, now);
+
+        let labels = [key.zone.as_str(), key.zone_id.as_str(), key.metric.as_str()];
+        metrics::SENSOR_QUARANTINED
+            .with_label_values(&labels)
+            .set(if state.is_quarantined { 1.0 } else { 0.0 });
+
+        if transition == sensor_health::QuarantineTransition::Entered {
+            metrics::QUARANTINE_EVENTS_TOTAL
+                .with_label_values(&labels)
+                .inc();
+            tracing::warn!(
+                "Sensor {}/{}/{} entered quarantine (score={:.1})",
+                key.zone, key.zone_id, key.metric, score
+            );
+        } else if transition == sensor_health::QuarantineTransition::Recovered {
+            tracing::info!(
+                "Sensor {}/{}/{} recovered from quarantine (score={:.1})",
+                key.zone, key.zone_id, key.metric, score
+            );
         }
     }
 }
