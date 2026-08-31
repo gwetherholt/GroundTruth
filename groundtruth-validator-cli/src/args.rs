@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use chrono::Duration;
 use clap::{Parser, ValueEnum};
+use groundtruth_validator::StuckMode;
 use std::ops::RangeInclusive;
 
 #[derive(Parser, Debug, Clone)]
@@ -35,8 +36,26 @@ pub struct Args {
     pub cadence: Duration,
 
     /// Consecutive readings within stuck-threshold to flag as stuck.
+    /// Count-based mode only.
     #[arg(long = "stuck-count", default_value_t = 6)]
     pub stuck_count: usize,
+
+    /// Stuck-detection mode. Defaults per metric: "duration" for
+    /// temperature and humidity (quantized, slow-moving), "count" for
+    /// everything else. See the validator crate README.
+    #[arg(long = "stuck-mode", value_enum)]
+    pub stuck_mode: Option<StuckModeArg>,
+
+    /// Sensor resolution (smallest reportable change), e.g. "0.1" for
+    /// a DHT22. Duration mode only; defaults to 0.1 for metrics that
+    /// use that mode.
+    #[arg(long = "resolution")]
+    pub resolution: Option<f64>,
+
+    /// How long a value may sit within --resolution before it is
+    /// called stuck, e.g. "60m". Duration mode only.
+    #[arg(long = "stuck-window", value_parser = parse_duration)]
+    pub stuck_window: Option<Duration>,
 
     /// Max absolute change between consecutive readings.
     #[arg(long = "max-rate", default_value_t = 10.0)]
@@ -49,6 +68,22 @@ pub struct Args {
     /// Disable colored output (also respected via NO_COLOR env var).
     #[arg(long = "no-color")]
     pub no_color: bool,
+}
+
+/// CLI spelling of [`groundtruth_validator::StuckMode`].
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StuckModeArg {
+    Count,
+    Duration,
+}
+
+impl From<StuckModeArg> for StuckMode {
+    fn from(m: StuckModeArg) -> Self {
+        match m {
+            StuckModeArg::Count => StuckMode::Count,
+            StuckModeArg::Duration => StuckMode::Duration,
+        }
+    }
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]

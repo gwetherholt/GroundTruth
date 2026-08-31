@@ -75,11 +75,7 @@ impl StreamValidator {
             Some(metric_config) => {
                 let state = self.source_state.entry(key.clone()).or_default();
                 let result = run_tier1(&reading, metric_config, state);
-                state.push(
-                    reading.timestamp,
-                    reading.value,
-                    metric_config.stuck_count.saturating_sub(1).max(1),
-                );
+                state.push_with_config(reading.timestamp, reading.value, metric_config);
                 result
             }
             None => ValidationResult::good(),
@@ -376,6 +372,50 @@ mod tests {
         }
         assert!(entered, "sensor should have entered quarantine");
         assert!(v.is_quarantined("bed/1", "moisture"));
+    }
+
+    #[test]
+    fn recovering_dht22_is_not_flagged_and_can_clear_quarantine() {
+        // The production case: a DHT22 comes back after a silent
+        // period and warms 65.8 → 69.4 over an afternoon at 0.1 °F
+        // steps. Under the count-based rule most of those readings
+        // were Suspect, which pinned the health score below the 70
+        // recovery threshold. With per-metric stuck detection the
+        // stream reads clean and can recover.
+        let config = ValidatorConfig::builder()
+            .metric(
+                "temperature",
+                MetricConfig::new(-40.0..=200.0)
+                    .with_max_rate_of_change(20.0)
+                    .with_expected_cadence(Duration::seconds(10))
+                    .with_stuck_defaults_for("temperature"),
+            )
+            .build();
+        let mut v = StreamValidator::new(config);
+
+        let samples = 4 * 3600 / 10;
+        let start = Utc::now() - Duration::seconds(samples * 10);
+        let mut suspect = 0;
+        let mut last = start;
+        for i in 0..samples {
+            let t = start + Duration::seconds(i * 10);
+            let value = 65.8 + (i / 30) as f64 * 0.1;
+            if v.validate(Reading::new("bed/1", "temperature", value, t)).quality
+                != QualityLevel::Good
+            {
+                suspect += 1;
+            }
+            last = t;
+        }
+        assert_eq!(suspect, 0, "healthy warm-up should produce no flags");
+
+        let scores = v.update_health_at(last);
+        let (_, _, score) = &scores[0];
+        assert!(
+            score.overall >= 70.0,
+            "score {} should clear the 70.0 recovery threshold",
+            score.overall
+        );
     }
 
     #[test]

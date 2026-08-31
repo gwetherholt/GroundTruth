@@ -62,13 +62,75 @@ Every reading runs through four rules in priority order:
 |----------------|-------------------------------------------------------------|----------|
 | value range    | Value outside the configured `valid_range`, or NaN          | Invalid  |
 | raw range      | Raw transducer reading outside `raw_valid_range`            | Invalid  |
-| stuck reading  | `stuck_count` consecutive readings within `stuck_threshold` | Suspect  |
+| stuck reading  | Count- or time-based, per metric — see below                 | Suspect  |
 | rate of change | Absolute delta > `max_rate_of_change` within `rate_window`  | Suspect  |
 
 Each result carries a [`QualityLevel`], the rule that fired, and a
 human-readable reason. Invalid readings are still emitted and recorded
 in the validator's internal history — the philosophy is "classify, not
 discard" so broken sources remain diagnosable.
+
+#### Stuck detection is per-metric
+
+"The value stopped moving" means different things depending on the
+transducer, so `StuckMode` picks the question to ask:
+
+| Mode                 | Fires when                                                     | Parameters                     | Fits                                        |
+|----------------------|----------------------------------------------------------------|--------------------------------|---------------------------------------------|
+| `StuckMode::Count`   | `stuck_count` consecutive readings all within `stuck_threshold` | `stuck_count`, `stuck_threshold` | Noisy analog sources                        |
+| `StuckMode::Duration`| Value stayed within `resolution` for at least `stuck_window`    | `resolution`, `stuck_window`   | Quantized sources measuring slow quantities |
+
+The distinction is **noise floor vs. resolution**:
+
+- A capacitive soil probe is a raw analog part. Its ADC output wanders
+  by ±25 counts even when the soil hasn't changed, so its *noise floor*
+  is far wider than the precision it reports at. Six consecutive
+  readings landing within ±0.01 of each other is physically
+  implausible — that's a frozen ADC, not stable soil. Counting repeats
+  is the right test, and it fires within seconds of the failure.
+
+- A DHT22 reports temperature in 0.1° steps. Its *resolution* is
+  coarser than the thing it's watching: a garage moves about 1°/hour,
+  so a correctly working DHT22 emits the same number for five minutes
+  at a stretch, and at a 10-second cadence that's 30 identical readings
+  in a row. Counting repeats flags a healthy sensor roughly 70% of the
+  time. What is actually abnormal is the value not moving for *an
+  hour*, regardless of how often the sensor publishes.
+
+Time-based detection is cadence-independent by construction: it tracks
+the start of the current unchanged run rather than a buffer of recent
+readings, so a 10-second and a 10-minute publisher both need the same
+wall-clock stillness before they're flagged. The reason string reports
+the elapsed time, e.g.
+`value unchanged (68.70 ±0.1) for 63 min — source may be stuck`.
+
+```rust
+use chrono::Duration;
+use groundtruth_validator::{MetricConfig, ValidatorConfig};
+
+let config = ValidatorConfig::builder()
+    // Analog: keep the count rule, tuned to the ADC noise floor.
+    .metric(
+        "moisture",
+        MetricConfig::new(0.0..=100.0)
+            .with_stuck_threshold(0.01)
+            .with_stuck_count(6),
+    )
+    // Quantized: 0.1° steps, flagged after an hour of stillness.
+    .metric(
+        "temperature",
+        MetricConfig::new(-40.0..=200.0)
+            .with_time_based_stuck(0.1, Duration::minutes(60)),
+    )
+    .build();
+```
+
+`MetricConfig::with_stuck_defaults_for(metric)` applies that same
+mapping by metric name — `temperature` and `humidity` get the
+time-based rule at 0.1 / 60 min, everything else keeps the count rule —
+so the server and `gt-validate` don't drift apart. It's the one
+deliberately domain-aware helper in the crate; ignore it and configure
+each metric explicitly if your names mean something else.
 
 ### Tier 2 — Health scoring
 
@@ -145,6 +207,12 @@ let config = ValidatorConfig::builder()
             .with_stuck_count(6)
             .with_expected_cadence(Duration::seconds(60)),
     )
+    .metric(
+        "temperature",
+        MetricConfig::new(-40.0..=200.0)
+            .with_time_based_stuck(0.1, Duration::minutes(60))
+            .with_expected_cadence(Duration::seconds(60)),
+    )
     .baseline_window(Duration::days(7))
     .health_check_interval(Duration::seconds(30))
     .quarantine_bad_threshold(40.0)
@@ -161,8 +229,11 @@ let config = ValidatorConfig::builder()
 | `raw_valid_range`    | `None`           | Inclusive plausible raw range; outside → Invalid  |
 | `max_rate_of_change` | `f64::INFINITY`  | Max absolute delta between consecutive readings   |
 | `rate_window`        | 600s             | Window in which rate-of-change applies            |
-| `stuck_threshold`    | 0.01             | Per-reading match tolerance for stuck detection   |
-| `stuck_count`        | 6                | Consecutive matches that trigger Suspect          |
+| `stuck_mode`         | `StuckMode::Count` | Which stuck rule applies to this metric         |
+| `stuck_threshold`    | 0.01             | Count mode: match tolerance — the noise floor     |
+| `stuck_count`        | 6                | Count mode: consecutive matches that trigger Suspect |
+| `resolution`         | `None`           | Duration mode: sensor quantization step (falls back to `stuck_threshold`) |
+| `stuck_window`       | 60 min           | Duration mode: how long the value may sit unchanged |
 | `expected_cadence`   | 60s              | Used by the Tier-2 cadence signal                 |
 
 ### `ValidatorConfig` global fields
@@ -201,8 +272,12 @@ public, so callers who want their own state ownership model can skip
 
 ## Testing
 
-47 unit and doc tests cover all four Tier-1 rules (including edge
-cases like NaN, short-circuit on Invalid, insufficient history),
+62 unit and doc tests cover all four Tier-1 rules (including edge
+cases like NaN, short-circuit on Invalid, insufficient history), both
+stuck-detection modes (a slow quantized ramp staying clean under the
+time rule while the same data trips the count rule, a frozen value
+flagged only once its window elapses, and a value that resumes moving
+before the window never flagged),
 Tier-2 health scoring (five signals, baseline insufficiency fallback,
 multi-source isolation), the quarantine state machine (hysteresis,
 counter resets on transitions, custom thresholds), config builder

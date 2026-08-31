@@ -94,12 +94,25 @@ Returns an array of `HealthReport` objects, sorted by score ascending
   signal values (0.0–1.0) for diagnostic display
 - `readings_in_window`, `last_good_reading_at`, `computed_at`
 
-## Prometheus metric
+## Prometheus metrics
 
 `groundtruth_sensor_health_score{zone, zone_id, metric}` (gauge, 0-100)
 
-Updated by the background refresh task every 30 seconds. See
-`docs/grafana-sensor-health-dashboard.json` for an importable dashboard.
+`groundtruth_last_reading_age_seconds{zone, zone_id, metric}` (gauge)
+— seconds since the stream last reported. Both are updated by the
+background refresh task every 30 seconds, so they keep moving while a
+sensor is silent.
+
+That matters because the *value* gauges do not. Once a stream has been
+quiet longer than `STALE_TIMEOUT_SECS` (default 300) the server stops
+exporting its temperature/humidity/moisture/raw_adc series entirely, so
+Prometheus records a gap instead of resampling a dead sensor's last
+value — see the [Metrics section of the top-level README](../README.md#metrics). Health and
+quarantine gauges are deliberately exempt: they are what you want to
+watch when a sensor dies.
+
+See `docs/grafana-sensor-health-dashboard.json` for an importable
+dashboard.
 
 ## What this is NOT
 

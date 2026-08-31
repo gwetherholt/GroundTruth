@@ -12,8 +12,14 @@ use crate::args::Args;
 use crate::csv_input::{build_readings, detect_schema, open_reader, read_csv};
 use crate::report::{HealthSummary, QuarantineSummary, Report, ReportBuilder};
 
-/// Build the validator config from the CLI args. The same metric
-/// configuration is reused for every metric column the CLI processes.
+/// Build the validator config for one metric column.
+///
+/// Stuck detection is per-metric, so the auto-detected (or
+/// `--metric`-supplied) column name selects the same profile the
+/// server uses: `temperature` and `humidity` get the time-based rule
+/// at 0.1 resolution over a 60-minute window, everything else keeps
+/// the count-based rule. `--stuck-mode`, `--resolution`, and
+/// `--stuck-window` override that per invocation.
 pub fn build_config_for(metric: &str, args: &Args) -> ValidatorConfig {
     let mut mc = MetricConfig::new(
         args.range
@@ -23,9 +29,19 @@ pub fn build_config_for(metric: &str, args: &Args) -> ValidatorConfig {
     .with_max_rate_of_change(args.max_rate)
     .with_rate_window(args.cadence * 10)
     .with_stuck_count(args.stuck_count)
-    .with_expected_cadence(args.cadence);
+    .with_expected_cadence(args.cadence)
+    .with_stuck_defaults_for(metric);
     if let Some(rr) = args.raw_range.clone() {
         mc = mc.with_raw_range(rr);
+    }
+    if let Some(mode) = args.stuck_mode {
+        mc = mc.with_stuck_mode(mode.into());
+    }
+    if let Some(resolution) = args.resolution {
+        mc = mc.with_resolution(resolution);
+    }
+    if let Some(window) = args.stuck_window {
+        mc = mc.with_stuck_window(window);
     }
     ValidatorConfig::builder().metric(metric, mc).build()
 }
@@ -164,6 +180,7 @@ pub fn run_with_reader<R: Read>(args: &Args, reader: R) -> Result<Vec<Report>> {
 mod tests {
     use super::*;
     use crate::args::OutputFormat;
+    use groundtruth_validator::StuckMode;
     use chrono::Duration;
     use std::io::Cursor;
     use std::ops::RangeInclusive;
@@ -177,6 +194,9 @@ mod tests {
             raw_range: None,
             cadence: Duration::seconds(30),
             stuck_count: 6,
+            stuck_mode: None,
+            resolution: None,
+            stuck_window: None,
             max_rate: 30.0,
             format: OutputFormat::Summary,
             no_color: true,
@@ -261,6 +281,75 @@ mod tests {
         let args = base_args();
         let err = run_with_reader(&args, Cursor::new(data)).unwrap_err();
         assert!(err.to_string().contains("no numeric value columns"));
+    }
+
+    // ---- Per-metric stuck detection --------------------------------
+
+    /// 90 minutes of a DHT22 at 30s cadence, ramping 0.1 °F every
+    /// 5 minutes — a healthy warm-up under one header name.
+    fn ramp_csv(column: &str) -> String {
+        let mut data = format!("timestamp,{}\n", column);
+        for i in 0..180i64 {
+            let secs = i * 30;
+            let ts = chrono::DateTime::parse_from_rfc3339("2026-05-16T12:00:00Z")
+                .unwrap()
+                .to_utc()
+                + Duration::seconds(secs);
+            data.push_str(&format!(
+                "{},{:.1}\n",
+                ts.to_rfc3339(),
+                65.8 + (secs / 300) as f64 * 0.1
+            ));
+        }
+        data
+    }
+
+    #[test]
+    fn detected_temperature_column_uses_time_based_stuck() {
+        let cfg = build_config_for("temperature", &base_args());
+        let mc = cfg.metric("temperature").unwrap();
+        assert_eq!(mc.stuck_mode, StuckMode::Duration);
+        assert_eq!(mc.resolution, Some(0.1));
+        assert_eq!(mc.stuck_window, Duration::minutes(60));
+    }
+
+    #[test]
+    fn detected_moisture_column_keeps_count_based_stuck() {
+        let cfg = build_config_for("moisture", &base_args());
+        let mc = cfg.metric("moisture").unwrap();
+        assert_eq!(mc.stuck_mode, StuckMode::Count);
+        assert_eq!(mc.stuck_count, 6);
+    }
+
+    #[test]
+    fn flags_explicitly_override_the_per_metric_defaults() {
+        let mut args = base_args();
+        args.stuck_mode = Some(crate::args::StuckModeArg::Count);
+        let cfg = build_config_for("temperature", &args);
+        assert_eq!(cfg.metric("temperature").unwrap().stuck_mode, StuckMode::Count);
+
+        let mut args = base_args();
+        args.stuck_mode = Some(crate::args::StuckModeArg::Duration);
+        args.resolution = Some(25.0);
+        args.stuck_window = Some(Duration::minutes(15));
+        let cfg = build_config_for("raw_adc", &args);
+        let mc = cfg.metric("raw_adc").unwrap();
+        assert_eq!(mc.stuck_mode, StuckMode::Duration);
+        assert_eq!(mc.resolution, Some(25.0));
+        assert_eq!(mc.stuck_window, Duration::minutes(15));
+    }
+
+    #[test]
+    fn temperature_ramp_is_clean_but_the_same_data_as_moisture_is_not() {
+        let args = base_args();
+        let temp = run_with_reader(&args, Cursor::new(ramp_csv("temperature"))).unwrap();
+        assert_eq!(temp[0].quality.suspect, 0, "healthy DHT22 warm-up");
+
+        let moisture = run_with_reader(&args, Cursor::new(ramp_csv("moisture"))).unwrap();
+        assert!(
+            moisture[0].quality.suspect > 0,
+            "count-based rule is still in force for moisture"
+        );
     }
 
     #[test]

@@ -21,20 +21,36 @@ pub type SharedValidator = Arc<Mutex<StreamValidator>>;
 /// Build the validator config that matches GroundTruth's sensor mix.
 /// Numbers come from the original hardcoded `limits` module so behavior
 /// stays equivalent to the pre-refactor server.
+///
+/// Stuck detection is the one place the sensors genuinely differ. The
+/// SEN0308 soil probe is a raw analog part with a ±25-count ADC noise
+/// floor, so six consecutive readings within ±0.01 really is broken.
+/// The DHT22 reports in 0.1 steps and watches a garage that moves
+/// ~1 °F/hour, so identical consecutive readings are its normal state —
+/// what's abnormal there is the value not moving for an hour.
 fn build_validator_config() -> ValidatorConfig {
+    // Moisture keeps the inherited 0.01 `stuck_threshold`, which on a
+    // calibrated percentage is an exact-repeat detector rather than a
+    // noise band. It works because ADC noise makes exact repeats rare,
+    // but it was never derived from the SEN0308's measured noise floor.
+    // That is the first number the characterization station owes us —
+    // see "Where this is going" in the top-level README.
     let moisture = MetricConfig::new(0.0..=100.0)
         .with_raw_range(100..=3995)
         .with_max_rate_of_change(30.0)
         .with_rate_window(Duration::seconds(600))
-        .with_expected_cadence(Duration::seconds(60));
+        .with_expected_cadence(Duration::seconds(60))
+        .with_stuck_defaults_for("moisture");
     let humidity = MetricConfig::new(0.0..=100.0)
         .with_max_rate_of_change(30.0)
         .with_rate_window(Duration::seconds(600))
-        .with_expected_cadence(Duration::seconds(60));
+        .with_expected_cadence(Duration::seconds(60))
+        .with_stuck_defaults_for("humidity");
     let temperature = MetricConfig::new(-40.0..=200.0)
         .with_max_rate_of_change(20.0)
         .with_rate_window(Duration::seconds(600))
-        .with_expected_cadence(Duration::seconds(60));
+        .with_expected_cadence(Duration::seconds(60))
+        .with_stuck_defaults_for("temperature");
 
     ValidatorConfig::builder()
         .metric("moisture", moisture)
@@ -63,6 +79,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()
         .expect("API_PORT must be a valid u16");
 
+    if let Ok(raw) = std::env::var("STALE_TIMEOUT_SECS") {
+        match raw.parse::<i64>() {
+            Ok(secs) if secs > 0 => metrics::set_stale_timeout_secs(secs),
+            _ => warn!(
+                "Ignoring STALE_TIMEOUT_SECS='{}' — expected a positive integer",
+                raw
+            ),
+        }
+    }
+    info!(
+        "Value gauges stop being exported after {}s of stream silence",
+        metrics::stale_timeout().num_seconds()
+    );
+
     let validator: SharedValidator =
         Arc::new(Mutex::new(StreamValidator::new(build_validator_config())));
 
@@ -77,6 +107,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
         loop {
             interval.tick().await;
+            // Age gauges climb on the tick, not only on arrival, so a
+            // silent stream's silence is itself visible in Prometheus.
+            metrics::refresh_stale_gauges(Utc::now());
+
             let mut v = match health_validator.lock() {
                 Ok(v) => v,
                 Err(_) => continue,
@@ -278,5 +312,31 @@ pub fn split_source(source: &str) -> (&str, &str) {
     match source.split_once('/') {
         Some((z, id)) => (z, id),
         None => (source, source),
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+    use groundtruth_validator::StuckMode;
+
+    #[test]
+    fn dht22_metrics_use_time_based_stuck_detection() {
+        let cfg = build_validator_config();
+        for metric in ["temperature", "humidity"] {
+            let mc = cfg.metric(metric).expect(metric);
+            assert_eq!(mc.stuck_mode, StuckMode::Duration, "{metric}");
+            assert_eq!(mc.resolution, Some(0.1), "{metric}");
+            assert_eq!(mc.stuck_window, Duration::minutes(60), "{metric}");
+        }
+    }
+
+    #[test]
+    fn soil_probe_keeps_count_based_stuck_detection() {
+        let cfg = build_validator_config();
+        let mc = cfg.metric("moisture").expect("moisture");
+        assert_eq!(mc.stuck_mode, StuckMode::Count);
+        assert_eq!(mc.stuck_count, 6);
+        assert_eq!(mc.stuck_threshold, 0.01);
     }
 }
