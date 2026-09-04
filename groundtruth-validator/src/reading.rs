@@ -45,9 +45,7 @@ impl Reading {
 /// Severity classification. Ord is derived so that
 /// `Invalid > Suspect > Good` — a reading's quality can be safely taken
 /// as the `max` of multiple rule outcomes.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum QualityLevel {
     Good,
     Suspect,

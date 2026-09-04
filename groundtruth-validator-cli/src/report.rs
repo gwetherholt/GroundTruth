@@ -194,11 +194,7 @@ impl ReportBuilder {
         self.skipped_rows += n as u64;
     }
 
-    pub fn finalize(
-        mut self,
-        health: HealthSummary,
-        quarantine: QuarantineSummary,
-    ) -> Report {
+    pub fn finalize(mut self, health: HealthSummary, quarantine: QuarantineSummary) -> Report {
         self.quality.finalize();
         let duration_seconds = match (self.first_timestamp, self.last_timestamp) {
             (Some(a), Some(b)) => (b - a).num_seconds().max(0),

@@ -51,7 +51,8 @@ impl SourceState {
     /// also advances the unchanged-run anchor.
     pub fn push(&mut self, timestamp: DateTime<Utc>, value: f64, cap: usize) {
         let cap = cap.max(1);
-        self.history.push_back(HistoricalReading { timestamp, value });
+        self.history
+            .push_back(HistoricalReading { timestamp, value });
         while self.history.len() > cap {
             self.history.pop_front();
         }
@@ -89,10 +90,7 @@ impl SourceState {
 }
 
 /// Rule 1: value range. NaN or out-of-range → Invalid.
-pub fn validate_value_range(
-    reading: &Reading,
-    config: &MetricConfig,
-) -> Option<ValidationResult> {
+pub fn validate_value_range(reading: &Reading, config: &MetricConfig) -> Option<ValidationResult> {
     if reading.value.is_nan() {
         return Some(ValidationResult::invalid(
             "value_range",
@@ -116,10 +114,7 @@ pub fn validate_value_range(
 
 /// Rule 2: raw transducer range. Only runs if the reading carries a
 /// raw value and the config specifies a raw range.
-pub fn validate_raw_range(
-    reading: &Reading,
-    config: &MetricConfig,
-) -> Option<ValidationResult> {
+pub fn validate_raw_range(reading: &Reading, config: &MetricConfig) -> Option<ValidationResult> {
     let raw = reading.raw_value?;
     let range = config.raw_valid_range.as_ref()?;
     if !range.contains(&raw) {
@@ -162,9 +157,9 @@ pub fn check_stuck_count(
         return None;
     }
     let recent = state.history.iter().rev().take(required_prior);
-    let all_match = recent.into_iter().all(|h| {
-        (h.value - reading.value).abs() <= config.stuck_threshold
-    });
+    let all_match = recent
+        .into_iter()
+        .all(|h| (h.value - reading.value).abs() <= config.stuck_threshold);
     if all_match {
         Some(ValidationResult::suspect(
             "stuck_reading",
@@ -413,7 +408,11 @@ mod tests {
     fn stuck_insufficient_history_is_good() {
         let cfg = moisture_config();
         let mut state = SourceState::new();
-        state.push(Utc::now() - Duration::seconds(60), 42.5, cfg.stuck_count - 1);
+        state.push(
+            Utc::now() - Duration::seconds(60),
+            42.5,
+            cfg.stuck_count - 1,
+        );
         let res = run_tier1(&r(42.5, 0), &cfg, &state);
         assert_eq!(res.quality, QualityLevel::Good);
     }
@@ -422,7 +421,11 @@ mod tests {
     fn rapid_change_is_suspect() {
         let cfg = moisture_config();
         let mut state = SourceState::new();
-        state.push(Utc::now() - Duration::seconds(60), 20.0, cfg.stuck_count - 1);
+        state.push(
+            Utc::now() - Duration::seconds(60),
+            20.0,
+            cfg.stuck_count - 1,
+        );
         let res = run_tier1(&r(80.0, 0), &cfg, &state);
         assert_eq!(res.quality, QualityLevel::Suspect);
         assert_eq!(res.rule, "rate_of_change");
@@ -432,7 +435,11 @@ mod tests {
     fn small_change_is_good() {
         let cfg = moisture_config();
         let mut state = SourceState::new();
-        state.push(Utc::now() - Duration::seconds(60), 40.0, cfg.stuck_count - 1);
+        state.push(
+            Utc::now() - Duration::seconds(60),
+            40.0,
+            cfg.stuck_count - 1,
+        );
         let res = run_tier1(&r(42.0, 0), &cfg, &state);
         assert_eq!(res.quality, QualityLevel::Good);
     }

@@ -3,9 +3,7 @@
 
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
-use groundtruth_validator::{
-    MetricConfig, QuarantineTransition, StreamValidator, ValidatorConfig,
-};
+use groundtruth_validator::{MetricConfig, QuarantineTransition, StreamValidator, ValidatorConfig};
 use std::io::Read;
 
 use crate::args::Args;
@@ -180,8 +178,8 @@ pub fn run_with_reader<R: Read>(args: &Args, reader: R) -> Result<Vec<Report>> {
 mod tests {
     use super::*;
     use crate::args::OutputFormat;
-    use groundtruth_validator::StuckMode;
     use chrono::Duration;
+    use groundtruth_validator::StuckMode;
     use std::io::Cursor;
     use std::ops::RangeInclusive;
 
@@ -207,7 +205,11 @@ mod tests {
     fn run_inline_csv_clean() {
         let mut data = String::from("timestamp,value\n");
         for i in 0..20 {
-            data.push_str(&format!("2026-05-16T12:00:{:02}Z,{}\n", i * 3, 40.0 + i as f64 * 0.5));
+            data.push_str(&format!(
+                "2026-05-16T12:00:{:02}Z,{}\n",
+                i * 3,
+                40.0 + i as f64 * 0.5
+            ));
         }
         let args = base_args();
         let reports = run_with_reader(&args, Cursor::new(data)).unwrap();
@@ -229,7 +231,7 @@ mod tests {
         let r = &reports[0];
         // After 5 prior readings of 42.5, the 6th and beyond trip stuck.
         assert!(r.quality.suspect > 0, "stuck rule should have fired");
-        assert!(r.flagged_rules.get("stuck_reading").is_some());
+        assert!(r.flagged_rules.contains_key("stuck_reading"));
     }
 
     #[test]
@@ -240,7 +242,7 @@ mod tests {
         let reports = run_with_reader(&args, Cursor::new(data)).unwrap();
         let r = &reports[0];
         assert_eq!(r.quality.invalid, 1);
-        assert!(r.flagged_rules.get("value_range").is_some());
+        assert!(r.flagged_rules.contains_key("value_range"));
     }
 
     #[test]
@@ -326,7 +328,10 @@ mod tests {
         let mut args = base_args();
         args.stuck_mode = Some(crate::args::StuckModeArg::Count);
         let cfg = build_config_for("temperature", &args);
-        assert_eq!(cfg.metric("temperature").unwrap().stuck_mode, StuckMode::Count);
+        assert_eq!(
+            cfg.metric("temperature").unwrap().stuck_mode,
+            StuckMode::Count
+        );
 
         let mut args = base_args();
         args.stuck_mode = Some(crate::args::StuckModeArg::Duration);

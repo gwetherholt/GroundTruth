@@ -351,8 +351,7 @@ mod tests {
     }
 
     fn sample(zone_id: &str, name: &str) -> Option<f64> {
-        series_for(zone_id, name)
-            .and_then(|l| l.rsplit(' ').next().and_then(|v| v.parse().ok()))
+        series_for(zone_id, name).and_then(|l| l.rsplit(' ').next().and_then(|v| v.parse().ok()))
     }
 
     #[test]
@@ -363,12 +362,12 @@ mod tests {
         record_reading_at(t0, "bed", id, "temperature", 73.0, None, "good");
 
         // Freshly reported: value present, age zero.
-        assert_eq!(
-            sample(id, "groundtruth_temperature_fahrenheit"),
-            Some(73.0)
-        );
+        assert_eq!(sample(id, "groundtruth_temperature_fahrenheit"), Some(73.0));
         refresh_stale_gauges(t0);
-        assert_eq!(sample(id, "groundtruth_last_reading_age_seconds"), Some(0.0));
+        assert_eq!(
+            sample(id, "groundtruth_last_reading_age_seconds"),
+            Some(0.0)
+        );
 
         // Silent, but inside the timeout: still exported.
         refresh_stale_gauges(t0 + Duration::seconds(120));
@@ -408,7 +407,10 @@ mod tests {
             "a new reading must restore the value gauge"
         );
         refresh_stale_gauges(back);
-        assert_eq!(sample(id, "groundtruth_last_reading_age_seconds"), Some(0.0));
+        assert_eq!(
+            sample(id, "groundtruth_last_reading_age_seconds"),
+            Some(0.0)
+        );
     }
 
     #[test]
@@ -458,7 +460,10 @@ mod tests {
         assert_eq!(series_for(id, "groundtruth_temperature_fahrenheit"), None);
         // ...but it is a known, live stream, so its age is tracked.
         refresh_stale_gauges(t0 + Duration::seconds(60));
-        assert_eq!(sample(id, "groundtruth_last_reading_age_seconds"), Some(60.0));
+        assert_eq!(
+            sample(id, "groundtruth_last_reading_age_seconds"),
+            Some(60.0)
+        );
     }
 
     #[test]

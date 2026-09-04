@@ -369,8 +369,7 @@ mod tests {
 
     #[test]
     fn time_based_stuck_sets_all_three_parameters() {
-        let m = MetricConfig::new(-40.0..=200.0)
-            .with_time_based_stuck(0.1, Duration::minutes(90));
+        let m = MetricConfig::new(-40.0..=200.0).with_time_based_stuck(0.1, Duration::minutes(90));
         assert_eq!(m.stuck_mode, StuckMode::Duration);
         assert_eq!(m.resolution, Some(0.1));
         assert_eq!(m.stuck_window, Duration::minutes(90));
@@ -418,11 +417,15 @@ mod tests {
     fn history_cap_never_zero() {
         assert_eq!(MetricConfig::new(0.0..=1.0).history_cap(), 5);
         assert_eq!(
-            MetricConfig::new(0.0..=1.0).with_stuck_count(1).history_cap(),
+            MetricConfig::new(0.0..=1.0)
+                .with_stuck_count(1)
+                .history_cap(),
             1
         );
         assert_eq!(
-            MetricConfig::new(0.0..=1.0).with_stuck_count(0).history_cap(),
+            MetricConfig::new(0.0..=1.0)
+                .with_stuck_count(0)
+                .history_cap(),
             1
         );
     }

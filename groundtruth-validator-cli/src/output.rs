@@ -248,9 +248,7 @@ fn status_badge(status: &str, color: bool) -> ColoredString {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::report::{
-        HealthSummary, QualityCounts, QuarantineSummary, ReportBuilder,
-    };
+    use crate::report::{HealthSummary, QualityCounts, QuarantineSummary, ReportBuilder};
     use chrono::{Duration, Utc};
     use groundtruth_validator::QualityLevel;
 

@@ -231,12 +231,7 @@ mod tests {
         let base = Utc::now() - Duration::seconds(60 * 10);
         // Six consecutive identical readings — the sixth should fire.
         for i in 0..6 {
-            let r = Reading::new(
-                "bed/1",
-                "moisture",
-                42.5,
-                base + Duration::seconds(60 * i),
-            );
+            let r = Reading::new("bed/1", "moisture", 42.5, base + Duration::seconds(60 * i));
             let res = v.validate(r);
             if i < 5 {
                 assert_eq!(res.quality, QualityLevel::Good, "i={i}");
@@ -400,7 +395,8 @@ mod tests {
         for i in 0..samples {
             let t = start + Duration::seconds(i * 10);
             let value = 65.8 + (i / 30) as f64 * 0.1;
-            if v.validate(Reading::new("bed/1", "temperature", value, t)).quality
+            if v.validate(Reading::new("bed/1", "temperature", value, t))
+                .quality
                 != QualityLevel::Good
             {
                 suspect += 1;

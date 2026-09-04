@@ -35,7 +35,9 @@ pub enum ColumnRole {
     Source,
     RawValue,
     /// A numeric value column. The metric name is the original header.
-    Value { metric: String },
+    Value {
+        metric: String,
+    },
     /// A column we couldn't make sense of — ignored.
     Ignored,
 }
@@ -49,15 +51,21 @@ pub struct DetectedSchema {
 
 impl DetectedSchema {
     pub fn timestamp_idx(&self) -> Option<usize> {
-        self.roles.iter().position(|r| matches!(r, ColumnRole::Timestamp))
+        self.roles
+            .iter()
+            .position(|r| matches!(r, ColumnRole::Timestamp))
     }
 
     pub fn source_idx(&self) -> Option<usize> {
-        self.roles.iter().position(|r| matches!(r, ColumnRole::Source))
+        self.roles
+            .iter()
+            .position(|r| matches!(r, ColumnRole::Source))
     }
 
     pub fn raw_idx(&self) -> Option<usize> {
-        self.roles.iter().position(|r| matches!(r, ColumnRole::RawValue))
+        self.roles
+            .iter()
+            .position(|r| matches!(r, ColumnRole::RawValue))
     }
 
     pub fn value_columns(&self) -> Vec<(usize, String)> {
@@ -76,10 +84,7 @@ impl DetectedSchema {
 /// `sample_rows` should be a small slice (one row is enough in practice);
 /// we use it only to confirm "numeric-looking" columns.
 pub fn detect_schema(headers: &[String], sample_rows: &[Vec<String>]) -> DetectedSchema {
-    let mut roles: Vec<ColumnRole> = headers
-        .iter()
-        .map(|h| classify_header(h))
-        .collect();
+    let mut roles: Vec<ColumnRole> = headers.iter().map(|h| classify_header(h)).collect();
 
     // Promote numeric-looking unassigned columns to Value, using the
     // header as the metric name.
@@ -151,8 +156,7 @@ pub fn open_reader(path: &str) -> Result<Box<dyn Read>> {
         Ok(Box::new(std::io::stdin()))
     } else {
         let p = Path::new(path);
-        let f = std::fs::File::open(p)
-            .with_context(|| format!("failed to open '{}'", path))?;
+        let f = std::fs::File::open(p).with_context(|| format!("failed to open '{}'", path))?;
         Ok(Box::new(f))
     }
 }
@@ -247,6 +251,7 @@ pub fn synthetic_timestamp(start: DateTime<Utc>, i: usize, cadence: Duration) ->
 ///
 /// Rows where the value cell is blank or non-numeric are skipped (with
 /// a count returned alongside, so the caller can report it).
+#[allow(clippy::too_many_arguments)] // internal plumbing; a params struct would add ceremony, not clarity
 pub fn build_readings(
     headers: &[String],
     rows: &[Vec<String>],
@@ -413,13 +418,19 @@ mod tests {
     #[test]
     fn parse_timestamp_rfc3339() {
         let dt = parse_timestamp("2026-05-16T12:00:00Z").unwrap();
-        assert_eq!(dt.format("%Y-%m-%d %H:%M:%S").to_string(), "2026-05-16 12:00:00");
+        assert_eq!(
+            dt.format("%Y-%m-%d %H:%M:%S").to_string(),
+            "2026-05-16 12:00:00"
+        );
     }
 
     #[test]
     fn parse_timestamp_iso_space() {
         let dt = parse_timestamp("2026-05-16 12:00:00").unwrap();
-        assert_eq!(dt.format("%Y-%m-%d %H:%M:%S").to_string(), "2026-05-16 12:00:00");
+        assert_eq!(
+            dt.format("%Y-%m-%d %H:%M:%S").to_string(),
+            "2026-05-16 12:00:00"
+        );
     }
 
     #[test]
@@ -485,7 +496,10 @@ mod tests {
         .unwrap();
         assert_eq!(skipped, 0);
         assert_eq!(readings.len(), 2);
-        assert_eq!((readings[1].timestamp - readings[0].timestamp).num_seconds(), 30);
+        assert_eq!(
+            (readings[1].timestamp - readings[0].timestamp).num_seconds(),
+            30
+        );
     }
 
     #[test]
