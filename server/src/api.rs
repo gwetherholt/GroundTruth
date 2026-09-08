@@ -343,3 +343,119 @@ fn internal_err(e: rusqlite::Error) -> StatusCode {
     error!("DB query error: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::build_validator_config;
+    use chrono::Duration;
+    use groundtruth_validator::{Reading as GtReading, StreamValidator};
+
+    /// A validator that has seen one garden stream and one bench
+    /// stream, with the bench stream long silent — the state the
+    /// health endpoints have to be honest about.
+    fn state_with_bench_and_bed() -> AppState {
+        let conn = rusqlite::Connection::open_in_memory().expect("in-memory db");
+        crate::db::create_schema(&conn).expect("schema");
+
+        let mut v = StreamValidator::new(build_validator_config());
+        let now = Utc::now();
+        for i in 0..30i64 {
+            v.validate(GtReading::new(
+                "bed/1",
+                "moisture",
+                42.0 + (i % 5) as f64 * 0.1,
+                now - Duration::seconds(60 * (29 - i)),
+            ));
+            // A session three weeks ago, then nothing.
+            v.validate(GtReading::new(
+                "charstation/3",
+                "raw_adc",
+                1500.0 + (i % 11) as f64,
+                now - Duration::days(21) + Duration::seconds(2 * i),
+            ));
+        }
+        // Enough ticks that anything scoreable would have quarantined.
+        for _ in 0..5 {
+            v.update_health();
+            v.update_quarantine();
+        }
+
+        AppState {
+            db: Arc::new(Mutex::new(conn)),
+            validator: Arc::new(Mutex::new(v)),
+        }
+    }
+
+    #[tokio::test]
+    async fn sensor_health_excludes_charstation_streams() {
+        let state = state_with_bench_and_bed();
+        let Json(entries) = sensor_health_handler(State(state)).await;
+
+        assert!(
+            entries.iter().any(|e| e.zone == "bed"),
+            "the garden stream should still be scored"
+        );
+        assert!(
+            entries.iter().all(|e| e.zone != "charstation"),
+            "bench streams must not appear in /api/sensor-health"
+        );
+    }
+
+    #[tokio::test]
+    async fn quarantine_response_excludes_charstation_streams() {
+        let state = state_with_bench_and_bed();
+        let Json(resp) = quarantine_handler(State(state)).await;
+
+        assert!(
+            resp.quarantined_sensors
+                .iter()
+                .all(|s| s.zone != "charstation"),
+            "a bench unit left in a drawer must never be quarantined"
+        );
+        // total_active_sensors counts scored streams, so the bench
+        // unit is not one of them.
+        assert_eq!(resp.total_active_sensors, 1);
+    }
+
+    #[tokio::test]
+    async fn charstation_readings_still_show_up_as_sensors_and_history() {
+        // The health endpoints exclude the bench; the data endpoints
+        // must not — the readings are the whole point of the station.
+        let state = state_with_bench_and_bed();
+        {
+            let conn = state.db.lock().unwrap();
+            crate::db::insert_reading(
+                &conn,
+                "charstation",
+                "3",
+                "raw_adc",
+                1487.0,
+                &Utc::now().to_rfc3339(),
+                Some(1487),
+                "good",
+                None,
+            )
+            .unwrap();
+        }
+
+        let Json(sensors) = sensors_handler(State(state.clone())).await.unwrap();
+        assert!(sensors
+            .iter()
+            .any(|s| s.zone == "charstation" && s.zone_id == "3" && s.metric == "raw_adc"));
+
+        let Json(history) = history_handler(
+            State(state),
+            Query(HistoryQuery {
+                zone: "charstation".to_string(),
+                zone_id: "3".to_string(),
+                metric: "raw_adc".to_string(),
+                hours: 24,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].raw_adc, Some(1487));
+    }
+}

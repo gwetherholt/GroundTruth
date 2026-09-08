@@ -25,9 +25,17 @@
 #include <PubSubClient.h>
 #include <DHT.h>
 
+// ─── Secrets ─────────────────────────────────────────────────────
+// WiFi credentials live in firmware/secrets.h, which is gitignored.
+// Copy firmware/secrets.h.example to firmware/secrets.h and fill it
+// in before compiling. This repo is public; credentials committed
+// here would stay in git history forever.
+#include "secrets.h"
+#if !defined(WIFI_SSID) || !defined(WIFI_PASSWORD)
+#error "secrets.h must define WIFI_SSID and WIFI_PASSWORD - see secrets.h.example"
+#endif
+
 // ─── Configuration ───────────────────────────────────────────────
-const char* WIFI_SSID     = "YOUR_SSID";
-const char* WIFI_PASSWORD = "YOUR_PASSWORD";
 const char* MQTT_BROKER   = "192.168.0.114";   // quailsync Pi LAN IP
 const int   MQTT_PORT     = 1883;
 const char* BED_ID        = "1";               // Change per node before flash
@@ -103,6 +111,11 @@ void publishReading(const char* metric, float value) {
 }
 
 // ─── Soil moisture: average several reads to smooth ADC noise ────
+// Resolution note: this sketch never calls analogReadResolution(), so
+// it runs at the arduino-esp32 default of 12 bits (0-4095) — the same
+// scale the characterization station sets explicitly. Both sketches
+// therefore produce comparable counts; only the station says so out
+// loud.
 float readSoilMoisturePercent() {
     const int samples = 16;
     long sum = 0;

@@ -9,6 +9,11 @@
 //!   and recency. See [`tier2`].
 //! - **Quarantine** state machine with hysteresis. See [`quarantine`].
 //!
+//! How much of that stack a stream gets is configurable per *source
+//! group* — see [`StreamPolicy`]. Streams whose silence and step
+//! changes are expected (a bench fixture, say) can take Tier-1 only,
+//! and then never accumulate health or quarantine state at all.
+//!
 //! Storage- and transport-agnostic: the validator holds its own
 //! in-memory rolling buffers. Persistence, metrics export, and ingest
 //! transport (MQTT, HTTP, Kafka, etc.) are caller concerns.
@@ -23,8 +28,8 @@ pub mod tier2;
 pub mod validator;
 
 pub use config::{
-    is_quantized_metric, MetricConfig, StuckMode, ValidatorConfig, ValidatorConfigBuilder,
-    DEFAULT_RESOLUTION, DEFAULT_STUCK_WINDOW_MINUTES,
+    is_quantized_metric, source_group, MetricConfig, SourceGroupConfig, StreamPolicy, StuckMode,
+    ValidatorConfig, ValidatorConfigBuilder, DEFAULT_RESOLUTION, DEFAULT_STUCK_WINDOW_MINUTES,
 };
 pub use quarantine::{update_quarantine, QuarantineState, QuarantineTransition};
 pub use reading::{QualityLevel, Reading, ValidationResult};

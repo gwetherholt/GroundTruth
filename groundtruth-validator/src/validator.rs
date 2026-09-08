@@ -21,7 +21,7 @@
 //! let _transitions = validator.update_quarantine();
 //! ```
 
-use crate::config::ValidatorConfig;
+use crate::config::{StreamPolicy, ValidatorConfig};
 use crate::quarantine::{update_quarantine, QuarantineState, QuarantineTransition};
 use crate::reading::{Reading, ValidationResult};
 use crate::tier1::{run_tier1, SourceState};
@@ -64,14 +64,21 @@ impl StreamValidator {
     /// then appended to that history, and the reading's quality flag
     /// is recorded in the Tier-2 health state.
     ///
-    /// If no `MetricConfig` exists for `reading.metric`, Tier-1 is
-    /// skipped (result = `Good`) and the reading is still tracked for
-    /// Tier-2 — a minimal no-op default rather than a hard error, so
-    /// callers can ingest first and configure later.
+    /// If no `MetricConfig` exists for `reading.metric` (after the
+    /// source group's overrides are consulted), Tier-1 is skipped
+    /// (result = `Good`) and the reading is still tracked for Tier-2 —
+    /// a minimal no-op default rather than a hard error, so callers can
+    /// ingest first and configure later.
+    ///
+    /// Sources whose group is [`StreamPolicy::Tier1Only`] get the
+    /// Tier-1 verdict and nothing else: no health history accumulates,
+    /// so they never appear in [`Self::update_health`],
+    /// [`Self::update_quarantine`], [`Self::sources`], or anything
+    /// derived from them.
     pub fn validate(&mut self, reading: Reading) -> ValidationResult {
         let key: SourceMetric = (reading.source.clone(), reading.metric.clone());
 
-        let result = match self.config.metric(&reading.metric) {
+        let result = match self.config.metric_for(&reading.source, &reading.metric) {
             Some(metric_config) => {
                 let state = self.source_state.entry(key.clone()).or_default();
                 let result = run_tier1(&reading, metric_config, state);
@@ -81,13 +88,15 @@ impl StreamValidator {
             None => ValidationResult::good(),
         };
 
-        let health_state = self.health_state.entry(key).or_default();
-        health_state.push(
-            reading.timestamp,
-            reading.value,
-            result.quality,
-            self.config.baseline_window,
-        );
+        if self.config.policy_for(&reading.source) == StreamPolicy::Full {
+            let health_state = self.health_state.entry(key).or_default();
+            health_state.push(
+                reading.timestamp,
+                reading.value,
+                result.quality,
+                self.config.baseline_window,
+            );
+        }
 
         result
     }
@@ -112,7 +121,7 @@ impl StreamValidator {
         let mut cache = HashMap::with_capacity(self.health_state.len());
 
         for (key, state) in self.health_state.iter() {
-            let metric_config = self.config.metric(&key.1);
+            let metric_config = self.config.metric_for(&key.0, &key.1);
             let score = compute_health_score(state, &self.config, metric_config, now);
             cache.insert(key.clone(), score.clone());
             out.push((key.0.clone(), key.1.clone(), score));
@@ -164,8 +173,9 @@ impl StreamValidator {
             .unwrap_or(false)
     }
 
-    /// All `(source, metric)` pairs the validator has seen, sorted for
-    /// stable iteration.
+    /// All `(source, metric)` pairs the validator is scoring, sorted
+    /// for stable iteration. [`StreamPolicy::Tier1Only`] streams are
+    /// not tracked for health and so are not listed.
     pub fn sources(&self) -> Vec<SourceMetric> {
         let mut keys: Vec<_> = self.health_state.keys().cloned().collect();
         keys.sort();
@@ -188,7 +198,7 @@ impl StreamValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::MetricConfig;
+    use crate::config::{MetricConfig, SourceGroupConfig};
     use crate::reading::QualityLevel;
     use chrono::{Duration, Utc};
 
@@ -412,6 +422,145 @@ mod tests {
             "score {} should clear the 70.0 recovery threshold",
             score.overall
         );
+    }
+
+    /// A bench fixture: Tier-1 only, with the rate check off for the
+    /// raw ADC because plugging a probe from air into water between
+    /// readings is the point of the exercise.
+    fn bench_cfg() -> ValidatorConfig {
+        ValidatorConfig::builder()
+            .metric(
+                "raw_adc",
+                MetricConfig::new(0.0..=4095.0)
+                    .with_raw_range(100..=3995)
+                    .with_max_rate_of_change(480.0),
+            )
+            .metric("temperature", MetricConfig::new(-40.0..=200.0))
+            .source_group(
+                "charstation",
+                SourceGroupConfig::tier1_only().metric(
+                    "raw_adc",
+                    MetricConfig::new(0.0..=4095.0)
+                        .with_raw_range(100..=3995)
+                        .without_rate_check(),
+                ),
+            )
+            .build()
+    }
+
+    #[test]
+    fn tier1_only_sources_get_no_health_or_quarantine_state() {
+        let mut v = StreamValidator::new(bench_cfg());
+        let now = Utc::now();
+        for i in 0..10i64 {
+            v.validate(Reading::new(
+                "charstation/3",
+                "raw_adc",
+                1500.0 + i as f64,
+                now + Duration::seconds(2 * i),
+            ));
+            v.validate(Reading::new(
+                "bed/1",
+                "temperature",
+                70.0 + i as f64 * 0.1,
+                now + Duration::seconds(2 * i),
+            ));
+        }
+
+        // The bench stream is invisible to Tier-2 and Tier-3...
+        let scores = v.update_health();
+        assert_eq!(scores.len(), 1);
+        assert_eq!(scores[0].0, "bed/1");
+        assert!(v.health_score("charstation/3", "raw_adc").is_none());
+
+        let transitions = v.update_quarantine();
+        assert!(transitions.iter().all(|(src, _, _)| src == "bed/1"));
+        assert!(v.quarantine_status("charstation/3", "raw_adc").is_none());
+        assert!(!v.is_quarantined("charstation/3", "raw_adc"));
+
+        // ...including in the list the API counts as active sensors.
+        assert_eq!(
+            v.sources(),
+            vec![("bed/1".to_string(), "temperature".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_bench_unit_silent_for_weeks_never_enters_quarantine() {
+        // The failure this policy exists to prevent: a unit measured
+        // once, unplugged, and left in a drawer until the next session.
+        let mut v = StreamValidator::new(bench_cfg());
+        let session = Utc::now() - Duration::days(21);
+        for i in 0..30i64 {
+            v.validate(Reading::new(
+                "charstation/3",
+                "raw_adc",
+                1500.0 + (i % 7) as f64,
+                session + Duration::seconds(2 * i),
+            ));
+        }
+        for _ in 0..5 {
+            v.update_health();
+            v.update_quarantine();
+        }
+        assert!(!v.is_quarantined("charstation/3", "raw_adc"));
+        assert!(v.quarantine_status("charstation/3", "raw_adc").is_none());
+    }
+
+    #[test]
+    fn tier1_still_applies_to_tier1_only_sources() {
+        let mut v = StreamValidator::new(bench_cfg());
+        let now = Utc::now();
+
+        // Raw range still fires: a shorted probe reads near zero.
+        let res = v.validate(Reading::new("charstation/3", "raw_adc", 12.0, now).with_raw(12));
+        assert_eq!(res.quality, QualityLevel::Invalid);
+        assert_eq!(res.rule, "raw_range");
+
+        // And count-based stuck detection still fires.
+        let mut v = StreamValidator::new(bench_cfg());
+        for i in 0..6 {
+            let res = v.validate(Reading::new(
+                "charstation/4",
+                "raw_adc",
+                1500.0,
+                now + Duration::seconds(2 * i),
+            ));
+            if i == 5 {
+                assert_eq!(res.quality, QualityLevel::Suspect);
+                assert_eq!(res.rule, "stuck_reading");
+            } else {
+                assert_eq!(res.quality, QualityLevel::Good, "i={i}");
+            }
+        }
+    }
+
+    #[test]
+    fn rate_of_change_is_off_for_the_bench_and_on_everywhere_else() {
+        let mut v = StreamValidator::new(bench_cfg());
+        let now = Utc::now();
+
+        // Air (≈3000 counts) to water (≈1200) between two readings —
+        // an 1800-count step that the garden config would flag.
+        v.validate(Reading::new("charstation/3", "raw_adc", 3000.0, now));
+        let res = v.validate(Reading::new(
+            "charstation/3",
+            "raw_adc",
+            1200.0,
+            now + Duration::seconds(2),
+        ));
+        assert_eq!(res.quality, QualityLevel::Good, "{}", res.reason);
+
+        // The same step on a garden stream is still suspect.
+        v.validate(Reading::new("bed/9", "raw_adc", 3000.0, now));
+        let res = v.validate(Reading::new(
+            "bed/9",
+            "raw_adc",
+            1200.0,
+            now + Duration::seconds(2),
+        ));
+        assert_eq!(res.quality, QualityLevel::Suspect);
+        assert_eq!(res.rule, "rate_of_change");
     }
 
     #[test]

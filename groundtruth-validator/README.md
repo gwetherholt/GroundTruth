@@ -236,6 +236,48 @@ let config = ValidatorConfig::builder()
 | `stuck_window`       | 60 min           | Duration mode: how long the value may sit unchanged |
 | `expected_cadence`   | 60s              | Used by the Tier-2 cadence signal                 |
 
+### Per-source-group policy
+
+Tier-2 and Tier-3 both assume a stream is *supposed* to keep reporting:
+they read silence as failure and a step change as instability. That is
+right for a deployed sensor and wrong for a bench fixture, where being
+unplugged for weeks and jumping from air to water between readings is
+the setup working. `StreamPolicy` makes that a config choice rather
+than something callers have to work around.
+
+A *source group* is the part of a source id before the first `/` —
+`"bed"` in `"bed/1"`. Registering one attaches a policy and, optionally,
+metric overrides that apply to that group alone:
+
+```rust
+use groundtruth_validator::{MetricConfig, SourceGroupConfig, ValidatorConfig};
+
+let config = ValidatorConfig::builder()
+    .metric("raw_adc", MetricConfig::new(0.0..=4095.0).with_max_rate_of_change(480.0))
+    .source_group(
+        "charstation",
+        // Tier-1 only: no health scoring, no quarantine, no state
+        // created for these streams at all.
+        SourceGroupConfig::tier1_only().metric(
+            "raw_adc",
+            // ...and on this bench, a step change is the experiment.
+            MetricConfig::new(0.0..=4095.0).without_rate_check(),
+        ),
+    )
+    .build();
+```
+
+| Policy                  | Tier-1 | Tier-2 health | Tier-3 quarantine |
+|-------------------------|--------|---------------|-------------------|
+| `StreamPolicy::Full` (default) | ✅ | ✅ | ✅ |
+| `StreamPolicy::Tier1Only`      | ✅ | ❌ | ❌ |
+
+`Tier1Only` sources still get every per-reading verdict, but they never
+appear in `update_health`, `update_quarantine`, `health_scores`,
+`quarantine_states`, or `sources`. Metric lookup consults the group's
+overrides first and falls back to the global table, so a group that
+measures something the usual way needs no entry for it.
+
 ### `ValidatorConfig` global fields
 
 | Field                              | Default | Meaning                                          |
@@ -245,6 +287,7 @@ let config = ValidatorConfig::builder()
 | `quarantine_bad_threshold`         | 40.0    | Score below this counts toward quarantine        |
 | `quarantine_recovery_threshold`    | 70.0    | Score at-or-above this counts toward recovery    |
 | `quarantine_consecutive_required`  | 3       | Consecutive checks required to transition        |
+| `source_groups`                    | empty   | Per-group policy + metric overrides (see above)  |
 
 ## API reference
 

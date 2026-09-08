@@ -51,7 +51,7 @@ GroundTruth is two things stacked:
 - Sensor health gauges exposed to Prometheus for ops-style alerting
 
 **2. The IoT system** (the reference implementation)
-- ESP32-C3 sensor nodes publishing soil moisture, temperature, humidity via MQTT
+- ESP32-S2 sensor nodes publishing soil moisture, temperature, humidity via MQTT
 - Rust ingestion server (Axum + tokio + rumqttc) handling MQTT subscription and HTTP API
 - SQLite persistence with quality flags inline on every row
 - Three observability surfaces: Next.js dashboard, Grafana, raw JSON API
@@ -156,6 +156,56 @@ The health-scoring layer noticed; the data did not. Both point the same
 way. Knowing what the hardware actually does is what makes the layer
 above it worth believing.
 
+### Characterization station
+
+The first piece of that station is in the tree now: a topic family, a
+validation policy, a session log, and a firmware sketch. Full detail in
+[docs/characterization-station.md](docs/characterization-station.md).
+
+The station publishes over the same broker as the garden, under its own
+namespace:
+
+```
+charstation/{unit_id}/raw_adc        # 1-16, mean of 16 ADC samples, every 2 s
+charstation/{unit_id}/temperature    # optional bench DHT22
+```
+
+Raw ADC only. There is deliberately no `charstation/{unit}/moisture` —
+calibrated moisture comes from a calibration curve, and the calibration
+curve is what the station exists to produce, so the topic parser
+rejects it.
+
+Bench conditions are logged by hand from the Pi rather than through a
+UI. Each retained message on `charstation/session` appends a row to
+`charstation_sessions`, stamped at receipt:
+
+```bash
+mosquitto_pub -h 192.168.0.114 -r -t charstation/session \
+  -m '{"unit_id": "3", "batch": "sand-100gkg", "insertion": 4, "notes": "reseated probe"}'
+```
+
+Readings then join to conditions by timestamp: a reading belongs to the
+most recent session row for its unit at or before the reading's time.
+Nothing else to drive, and the whole protocol runs from a terminal.
+
+**Station streams get Tier-1 only.** They are lab streams, not garden
+streams: a unit gets plugged in for twenty minutes, moved from sand to
+water mid-session, unplugged, and left in a drawer for three weeks.
+Tier-2 health scoring and Tier-3 quarantine both read silence as
+failure and steps as instability, so applied here they would call every
+unit on the bench broken — and a quarantine flag that fires on correct
+behavior teaches you to ignore quarantine flags. Rate-of-change is off
+for the same reason: moving the probe between media is the experiment.
+What stays on is per-reading Tier-1 — range, raw range, stuck
+detection — which catches a shorted or disconnected probe on the bench
+exactly as it does in a bed.
+
+The mechanism is a per-source-group policy in the validator config
+(`StreamPolicy::Tier1Only` on the `charstation` group), not a
+`zone == "charstation"` check sprinkled through the server. Groups
+carry metric overrides too, which is how the rate check gets disabled
+for bench raw ADC while the garden keeps its ceiling.
+
 ---
 
 ## Workspace structure
@@ -229,7 +279,7 @@ and slow degradation patterns that escape per-reading validation.
 
 ```
 ┌──────────────────────┐
-│  ESP32-C3 nodes      │  ───MQTT───┐
+│  ESP32-S2 nodes      │  ───MQTT───┐
 │  + SEN0308 (soil)    │            │
 │  + DHT22 (climate)   │            │
 └──────────────────────┘            │
@@ -296,17 +346,56 @@ persistence and configuration is a known follow-up. See "What's next".
 The IoT side is well-trodden territory, but the design choices are worth
 calling out:
 
-- **ESP32-C3 Super Mini** sensor nodes, deployed to a greenhouse
+- **LOLIN S2 Mini** (ESP32-S2FN4R2) — the **garden nodes**, deployed to
+  a greenhouse
+- **ESP32-C3 Super Mini** — the **characterization station**, bench
+  hardware bought separately for the study
 - **DFRobot SEN0308** capacitive soil moisture (analog, 3.3V)
 - **DHT22** temperature and humidity (digital, one-wire)
 - **Raspberry Pi 5** running the Docker Compose stack
 
-The sensor node firmware ships in two variants:
+**Two different boards, on purpose.** The garden runs on the S2; the
+bench station runs on the C3. They have different ADC pin maps,
+different strapping pins, and different USB pins, so pin choices do not
+transfer between the sketches — `groundtruth_charstation.ino` is the
+only C3 sketch in the repo, and its header carries the C3 pin map.
+Anyone reading a single sketch header and concluding the whole project
+is one board has read half the story; this list is the other half.
 
-- `groundtruth_node_soil_only.ino` — production, ESP-IDF deep sleep for
-  ~5-minute wake cycles. Battery-friendly.
-- `groundtruth_node_dev.ino` — bench debugging, no deep sleep, 10s loop,
-  USB stays alive for live serial output during calibration.
+The firmware ships in three sketches:
+
+- `groundtruth_node.ino` — production, DHT22 + SEN0308, ESP-IDF deep
+  sleep for ~5-minute wake cycles. Battery-friendly.
+- `groundtruth_node_soil_only.ino` — same, without the DHT22.
+- `groundtruth_charstation.ino` — the characterization station: no deep
+  sleep, 2s loop, raw ADC only, unit under test set at runtime over
+  MQTT. See [docs/characterization-station.md](docs/characterization-station.md).
+
+**Before compiling any of them**, copy the secrets template and fill in
+your WiFi details:
+
+```bash
+cp firmware/secrets.h.example firmware/secrets.h
+```
+
+`firmware/secrets.h` is gitignored and must stay that way — this
+repository is public, and git history keeps committed credentials even
+after the file is deleted. The MQTT broker address stays in the sketch;
+it is a LAN address, not a credential. If you compile a sketch from its
+own folder rather than from `firmware/`, copy `secrets.h` next to the
+`.ino` — Arduino resolves the include relative to the sketch.
+
+Board settings, per sketch — **USB CDC On Boot must be Enabled** on
+both boards or there is no Serial over USB:
+
+| Sketch | Board | Arduino IDE | `arduino-cli --fqbn` |
+|--------|-------|-------------|----------------------|
+| `groundtruth_node.ino`, `groundtruth_node_soil_only.ino` | LOLIN S2 Mini | Tools > Board > esp32 > "LOLIN S2 Mini" | `esp32:esp32:lolin_s2_mini:CDCOnBoot=cdc` |
+| `groundtruth_charstation.ino` | ESP32-C3 Super Mini | Tools > Board > esp32 > "ESP32C3 Dev Module" | `esp32:esp32:esp32c3:CDCOnBoot=cdc` |
+
+The C3 Super Mini is a generic clone, so the Dev Module profile is the
+safe pick. Confirm the board ids on your own install with
+`arduino-cli board listall`.
 
 The Rust ingestion server is single-threaded async (`#[tokio::main]`)
 with the SQLite connection wrapped in `Arc<Mutex<Connection>>` and
@@ -339,7 +428,7 @@ GroundTruth/
 │   ├── topics.rs            # MQTT topic parser
 │   └── metrics.rs           # Prometheus instrumentation
 ├── web/                      # Next.js dashboard
-├── firmware/                 # ESP32-C3 firmware (deep-sleep + dev variants)
+├── firmware/                 # ESP32 sketches (garden deep-sleep + bench station)
 ├── prometheus/               # Bundled Prometheus config
 ├── docs/                     # Setup runbooks, dashboard JSONs, design docs
 └── docker-compose.yml

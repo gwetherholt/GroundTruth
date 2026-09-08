@@ -235,6 +235,16 @@ pub fn record_reading_at(
                 }
                 exported_value = true;
             }
+            // The characterization station publishes raw counts as
+            // the reading itself, with no calibrated value to hang
+            // them off. They are the same quantity the garden's
+            // `moisture_raw` carries — a SEN0308's ADC output — so
+            // they share the gauge; the `zone` label separates bench
+            // from bed.
+            "raw_adc" => {
+                MOISTURE_RAW.with_label_values(&[zone, zone_id]).set(value);
+                exported_value = true;
+            }
             "temperature" => {
                 TEMPERATURE_F.with_label_values(&[zone, zone_id]).set(value);
                 exported_value = true;
@@ -299,6 +309,9 @@ fn remove_value_gauges(zone: &str, zone_id: &str, metric: &str) {
     match metric {
         "moisture" => {
             let _ = MOISTURE_PCT.remove_label_values(&labels);
+            let _ = MOISTURE_RAW.remove_label_values(&labels);
+        }
+        "raw_adc" => {
             let _ = MOISTURE_RAW.remove_label_values(&labels);
         }
         "temperature" => {
@@ -425,6 +438,33 @@ mod tests {
         refresh_stale_gauges(t0 + Duration::seconds(301));
         assert_eq!(series_for(id, "groundtruth_moisture_percent"), None);
         assert_eq!(series_for(id, "groundtruth_moisture_raw_adc"), None);
+    }
+
+    #[test]
+    fn charstation_raw_adc_exports_a_value_gauge_that_goes_stale() {
+        let _guard = isolated();
+        // A bench session ends when the unit is unplugged. The value
+        // gauge dropping out five minutes later is correct: there is
+        // no reading, so there should be no series.
+        let id = "stale-charstation";
+        let t0 = Utc::now();
+        record_reading_at(t0, "charstation", id, "raw_adc", 1487.0, Some(1487), "good");
+        assert_eq!(sample(id, "groundtruth_moisture_raw_adc"), Some(1487.0));
+
+        refresh_stale_gauges(t0 + Duration::seconds(120));
+        assert_eq!(sample(id, "groundtruth_moisture_raw_adc"), Some(1487.0));
+        assert_eq!(
+            sample(id, "groundtruth_last_reading_age_seconds"),
+            Some(120.0)
+        );
+
+        refresh_stale_gauges(t0 + Duration::seconds(301));
+        assert_eq!(series_for(id, "groundtruth_moisture_raw_adc"), None);
+
+        // ...and the age keeps climbing through the weeks a unit
+        // spends in a drawer between sessions.
+        refresh_stale_gauges(t0 + Duration::days(21));
+        assert!(sample(id, "groundtruth_last_reading_age_seconds").unwrap() > 1_000_000.0);
     }
 
     #[test]

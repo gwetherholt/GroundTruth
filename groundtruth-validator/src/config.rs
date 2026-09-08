@@ -119,6 +119,16 @@ impl MetricConfig {
         self
     }
 
+    /// Turn the rate-of-change rule off for this metric. Use it where
+    /// large steps between consecutive readings are the *expected*
+    /// behavior of the setup rather than a symptom — a bench fixture
+    /// whose probe is pulled out of one medium and pushed into another
+    /// between readings, for instance.
+    pub fn without_rate_check(mut self) -> Self {
+        self.max_rate_of_change = f64::INFINITY;
+        self
+    }
+
     pub fn with_rate_window(mut self, window: Duration) -> Self {
         self.rate_window = window;
         self
@@ -223,11 +233,81 @@ pub fn is_quantized_metric(metric: &str) -> bool {
     )
 }
 
+/// How much of the pipeline applies to a group of streams.
+///
+/// Tier-2 health scoring and Tier-3 quarantine both assume a stream is
+/// *supposed* to keep reporting: they read silence as failure and a
+/// sudden step as instability. That assumption holds for a sensor
+/// buried in a garden bed and breaks completely for one on a bench,
+/// where being unplugged for three weeks between sessions and jumping
+/// from air to water between readings is the experiment working.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StreamPolicy {
+    /// Tier-1 per-reading rules, Tier-2 health scoring, Tier-3
+    /// quarantine. The default for anything not configured otherwise.
+    #[default]
+    Full,
+    /// Tier-1 per-reading rules only. No health state is accumulated
+    /// and no quarantine state machine is created, so these streams
+    /// never appear in health scores, quarantine listings, or the
+    /// gauges derived from them.
+    Tier1Only,
+}
+
+/// Per-source-group configuration: a policy plus optional metric
+/// overrides.
+///
+/// A *source group* is the part of a source id before the first `/` —
+/// `"bed"` in `"bed/1"`, `"charstation"` in `"charstation/3"`. (The
+/// GroundTruth server calls this a zone.) Grouping at that level is
+/// what lets a whole family of streams share a policy without the
+/// group name being spelled out anywhere but the config.
+///
+/// `metrics` overrides the top-level metric table for this group only.
+/// A metric absent here falls back to the global config, so a group
+/// that measures `temperature` the same way everyone else does needs
+/// no entry at all.
+#[derive(Debug, Clone, Default)]
+pub struct SourceGroupConfig {
+    pub policy: StreamPolicy,
+    pub metrics: HashMap<String, MetricConfig>,
+}
+
+impl SourceGroupConfig {
+    pub fn new(policy: StreamPolicy) -> Self {
+        Self {
+            policy,
+            metrics: HashMap::new(),
+        }
+    }
+
+    /// Shorthand for [`StreamPolicy::Tier1Only`].
+    pub fn tier1_only() -> Self {
+        Self::new(StreamPolicy::Tier1Only)
+    }
+
+    /// Override one metric's config for this group only.
+    pub fn metric(mut self, name: impl Into<String>, config: MetricConfig) -> Self {
+        self.metrics.insert(name.into(), config);
+        self
+    }
+}
+
+/// The group a source belongs to: everything before the first `/`, or
+/// the whole string if there is no `/`.
+pub fn source_group(source: &str) -> &str {
+    source.split_once('/').map(|(g, _)| g).unwrap_or(source)
+}
+
 /// Top-level validator configuration. Holds per-metric configs plus
 /// global Tier-2 / quarantine knobs. Build via [`ValidatorConfig::builder`].
 #[derive(Debug, Clone)]
 pub struct ValidatorConfig {
     pub metrics: HashMap<String, MetricConfig>,
+    /// Per-source-group policies and metric overrides, keyed by group
+    /// name (see [`source_group`]). Groups absent here get
+    /// [`StreamPolicy::Full`] and the global metric table.
+    pub source_groups: HashMap<String, SourceGroupConfig>,
     pub baseline_window: Duration,
     pub health_check_interval: Duration,
     pub quarantine_bad_threshold: f64,
@@ -239,6 +319,7 @@ impl Default for ValidatorConfig {
     fn default() -> Self {
         Self {
             metrics: HashMap::new(),
+            source_groups: HashMap::new(),
             baseline_window: Duration::days(7),
             health_check_interval: Duration::seconds(30),
             quarantine_bad_threshold: 40.0,
@@ -256,6 +337,26 @@ impl ValidatorConfig {
     pub fn metric(&self, name: &str) -> Option<&MetricConfig> {
         self.metrics.get(name)
     }
+
+    /// The config for `source`'s group, if one was registered.
+    pub fn group(&self, source: &str) -> Option<&SourceGroupConfig> {
+        self.source_groups.get(source_group(source))
+    }
+
+    /// Which tiers apply to `source`. Unregistered groups get
+    /// [`StreamPolicy::Full`].
+    pub fn policy_for(&self, source: &str) -> StreamPolicy {
+        self.group(source).map(|g| g.policy).unwrap_or_default()
+    }
+
+    /// The effective metric config for one stream: the source group's
+    /// override if it has one, else the global entry, else `None`
+    /// (which makes Tier-1 a no-op for that metric).
+    pub fn metric_for(&self, source: &str, metric: &str) -> Option<&MetricConfig> {
+        self.group(source)
+            .and_then(|g| g.metrics.get(metric))
+            .or_else(|| self.metric(metric))
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -266,6 +367,12 @@ pub struct ValidatorConfigBuilder {
 impl ValidatorConfigBuilder {
     pub fn metric(mut self, name: impl Into<String>, config: MetricConfig) -> Self {
         self.inner.metrics.insert(name.into(), config);
+        self
+    }
+
+    /// Register a policy (and any metric overrides) for a source group.
+    pub fn source_group(mut self, name: impl Into<String>, config: SourceGroupConfig) -> Self {
+        self.inner.source_groups.insert(name.into(), config);
         self
     }
 
@@ -411,6 +518,80 @@ mod tests {
             .with_stuck_defaults_for("temperature");
         assert_eq!(m.max_rate_of_change, 20.0);
         assert_eq!(m.expected_cadence, Duration::seconds(30));
+    }
+
+    #[test]
+    fn source_group_splits_on_first_slash() {
+        assert_eq!(source_group("bed/1"), "bed");
+        assert_eq!(source_group("charstation/12"), "charstation");
+        assert_eq!(source_group("greenhouse"), "greenhouse");
+        assert_eq!(source_group(""), "");
+    }
+
+    #[test]
+    fn unregistered_groups_get_the_full_pipeline() {
+        let cfg = ValidatorConfig::builder().build();
+        assert_eq!(cfg.policy_for("bed/1"), StreamPolicy::Full);
+        assert!(cfg.group("bed/1").is_none());
+    }
+
+    #[test]
+    fn registered_group_policy_applies_to_every_source_in_it() {
+        let cfg = ValidatorConfig::builder()
+            .source_group("charstation", SourceGroupConfig::tier1_only())
+            .build();
+        assert_eq!(cfg.policy_for("charstation/1"), StreamPolicy::Tier1Only);
+        assert_eq!(cfg.policy_for("charstation/16"), StreamPolicy::Tier1Only);
+        assert_eq!(cfg.policy_for("bed/1"), StreamPolicy::Full);
+    }
+
+    #[test]
+    fn group_metric_override_wins_and_falls_back() {
+        let cfg = ValidatorConfig::builder()
+            .metric(
+                "raw_adc",
+                MetricConfig::new(0.0..=4095.0).with_max_rate_of_change(480.0),
+            )
+            .metric("temperature", MetricConfig::new(-40.0..=200.0))
+            .source_group(
+                "charstation",
+                SourceGroupConfig::tier1_only().metric(
+                    "raw_adc",
+                    MetricConfig::new(0.0..=4095.0).without_rate_check(),
+                ),
+            )
+            .build();
+
+        // Overridden for the group...
+        assert!(cfg
+            .metric_for("charstation/3", "raw_adc")
+            .unwrap()
+            .max_rate_of_change
+            .is_infinite());
+        // ...untouched for everyone else...
+        assert_eq!(
+            cfg.metric_for("bed/1", "raw_adc")
+                .unwrap()
+                .max_rate_of_change,
+            480.0
+        );
+        // ...and metrics the group doesn't override fall back to global.
+        assert_eq!(
+            cfg.metric_for("charstation/3", "temperature")
+                .unwrap()
+                .valid_range,
+            -40.0..=200.0
+        );
+        // Unknown metrics stay unknown.
+        assert!(cfg.metric_for("charstation/3", "pressure").is_none());
+    }
+
+    #[test]
+    fn without_rate_check_disables_the_rule() {
+        let m = MetricConfig::new(0.0..=4095.0)
+            .with_max_rate_of_change(480.0)
+            .without_rate_check();
+        assert!(m.max_rate_of_change.is_infinite());
     }
 
     #[test]

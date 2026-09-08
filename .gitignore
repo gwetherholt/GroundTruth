@@ -2,3 +2,8 @@
 *.db
 *.db-journal
 .env
+
+# WiFi credentials — copy firmware/secrets.h.example to firmware/secrets.h.
+# Never commit the filled-in file: this repo is public and git history
+# keeps deleted content forever.
+firmware/secrets.h
